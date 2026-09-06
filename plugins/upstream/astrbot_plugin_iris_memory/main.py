@@ -41,15 +41,20 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
-
 from iris_memory.cognitive.contracts import EventExecutionContext, RuntimeMode
 from iris_memory.cognitive.episode import EpisodeState
 from iris_memory.cognitive.episode_lifecycle import EpisodeLifecycleOwnerV1
 from iris_memory.cognitive.episode_shadow import EpisodeShadowObserver
 from iris_memory.cognitive.episode_store import AppendOnlyEpisodeStore
 from iris_memory.cognitive.explicit_correction_rule import (
-    ExplicitCorrectionProductionPromoterV1,
     RULE_ID as EXPLICIT_CORRECTION_RULE_ID,
+)
+from iris_memory.cognitive.explicit_correction_rule import (
+    ExplicitCorrectionProductionPromoterV1,
+)
+from iris_memory.cognitive.interaction_trace import (
+    InteractionTraceMetricsV1,
+    PassiveInteractionTraceV1,
 )
 from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
 from iris_memory.cognitive.legacy_proactive import LegacyIrisProactiveSignalAdapter
@@ -249,6 +254,10 @@ class IrisMemoryPlugin(Star):
             self._production_semantic_evaluator: str | None = None
             self._semantic_evaluator_requested = False
             self._semantic_evaluator_retry_task: asyncio.Task | None = None
+            # P2x.1 is deliberately passive: it snapshots raw platform facts
+            # and observes existing lifecycle callbacks without owning any
+            # event, request, result, or send operation.
+            self._interaction_trace = PassiveInteractionTraceV1()
             self._reply_in_progress: dict[str, float] = {}
             self._passive_active: dict[str, float] = {}
             self._triggering: dict[str, float] = {}
@@ -685,6 +694,10 @@ class IrisMemoryPlugin(Star):
     # 生命周期
     # ========================================================================
 
+    def interaction_trace_metrics(self) -> InteractionTraceMetricsV1:
+        """Return the read-only P2x.1 passive trace counters."""
+        return self._interaction_trace.snapshot()
+
     async def initialize(self) -> None:
         # 0. Episode/Outcome Shadow observation (fail-open).
         self._init_episode_shadow_observer()
@@ -761,6 +774,9 @@ class IrisMemoryPlugin(Star):
     async def terminate(self):
         """插件卸载清理"""
         logger.info("开始关闭插件组件...")
+        interaction_trace = getattr(self, "_interaction_trace", None)
+        if interaction_trace is not None:
+            interaction_trace.close()
         if self._episode_lifecycle_owner is not None:
             await self._episode_lifecycle_owner.shutdown()
             self._episode_lifecycle_owner = None
@@ -1151,6 +1167,14 @@ class IrisMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent) -> None:
         """记忆侧：全类型消息入 L1 缓冲、图片入队"""
+        # P2x.1 passive trace: no await, no event mutation, no re-dispatch.
+        try:
+            self._interaction_trace.observe_inbound(event)
+        except Exception:  # pragma: no cover - defensive passive boundary
+            logger.debug(
+                "P2x.1 interaction trace skipped malformed event",
+                exc_info=True,
+            )
         await self._ensure_semantic_evaluator()
         capture = getattr(self, "_p2r0_capture", None)
         if capture is not None:
@@ -1171,6 +1195,10 @@ class IrisMemoryPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        try:
+            self._interaction_trace.observe_host_execution(event)
+        except Exception:  # pragma: no cover - defensive passive boundary
+            logger.debug("P2x.1 Host execution trace skipped", exc_info=True)
         # 1. Cognitive P0.5 evaluates first in Shadow by default.  It does not
         # alter the legacy decision unless an explicitly enabled GUARD blocks.
         if await self._handle_cognitive_behavior(event):
@@ -1442,6 +1470,10 @@ class IrisMemoryPlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
+        try:
+            self._interaction_trace.observe_logical_response(event, resp)
+        except Exception:  # pragma: no cover - defensive passive boundary
+            logger.debug("P2x.1 logical response trace skipped", exc_info=True)
         tracking = event.get_extra("iris_llm_tracking")
         if tracking and self._llm_manager:
             try:
@@ -1591,6 +1623,13 @@ class IrisMemoryPlugin(Star):
     @_after_message_send_result()
     async def on_message_send_result(self, event, result) -> None:
         """Observe finalized H0 receipts without controlling the send result."""
+        try:
+            self._interaction_trace.observe_send_receipt(event, result)
+        except Exception:  # pragma: no cover - defensive passive boundary
+            logger.debug(
+                "P2x.1 send receipt trace skipped",
+                exc_info=True,
+            )
         capture = getattr(self, "_p2r0_capture", None)
         if capture is None:
             return
