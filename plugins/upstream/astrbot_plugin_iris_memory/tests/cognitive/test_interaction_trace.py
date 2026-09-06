@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-
 from iris_memory.cognitive.interaction_trace import (
     CandidateTurnTraceV1,
     ConversationKeyV1,
+    InteractionTraceObservatoryProjectionV1,
     PassiveInteractionTraceV1,
     RawEventEnvelopeV1,
     ScopeKind,
@@ -84,6 +85,36 @@ def _receipt(*statuses: str) -> object:
         for status in statuses
     )
     return SimpleNamespace(schema_version="astrbot.host-send-result.v1", operations=operations)
+
+
+def _candidate(
+    key: ConversationKeyV1,
+    observed_order: int,
+    umo: str | None,
+    *,
+    raw_event_count: int = 1,
+    logical_host_results: int = 1,
+    actual_send_count: int = 1,
+) -> CandidateTurnTraceV1:
+    events = tuple(
+        RawEventEnvelopeV1(
+            conversation_key=key,
+            legacy_umo=umo,
+            source_event_id=f"event-{observed_order}-{index}",
+            message_chain=({"type": "Plain"},),
+            reply_metadata={"has_reply": False},
+            observed_order=observed_order + index,
+            received_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        for index in range(raw_event_count)
+    )
+    return CandidateTurnTraceV1(
+        turn_id=f"turn-{observed_order}",
+        conversation_key=key,
+        raw_events=events,
+        logical_host_results=logical_host_results,
+        actual_send_count=actual_send_count,
+    )
 
 
 def test_conversation_key_uses_explicit_scope_and_preserves_umo() -> None:
@@ -260,3 +291,107 @@ def test_ttl_expiration_removes_continuity_state() -> None:
 
     assert tracer.snapshot(now=62.0).legacy_umo_continuity == 1
     assert len(tracer._last_umo) == 1
+
+
+def test_observatory_projection_is_sanitized_and_reads_one_live_tracer() -> None:
+    tracer = PassiveInteractionTraceV1()
+    tracer.observe_inbound(
+        _Event("private-source-id", components=(_Plain("private raw text"), _Reply("host-id"))),
+        now=0.0,
+    )
+    summary = InteractionTraceObservatoryProjectionV1(tracer).read_summary()
+    encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+    assert summary["available"] is True
+    assert summary["schema_version"] == "p2x.interaction-observatory.v1"
+    assert "private-source-id" not in encoded
+    assert "private raw text" not in encoded
+    assert "host-id" not in encoded
+    assert "aiocqhttp:private:user-1" not in encoded
+    assert len(tracer.completed_candidates(now=30.0)) == 1
+
+
+def test_observatory_projection_does_not_observe_or_mutate_trace() -> None:
+    tracer = PassiveInteractionTraceV1()
+    tracer.observe_inbound(_Event("projection-read"), now=0.0)
+    before = tracer.snapshot(now=0.0)
+    summary = InteractionTraceObservatoryProjectionV1(tracer).read_summary()
+    after = tracer.snapshot(now=0.0)
+    assert summary["mode"] == "PASSIVE"
+    assert after.raw_events == before.raw_events
+    assert after.candidate_turns == before.candidate_turns
+    assert after.actual_host_executions == before.actual_host_executions
+
+
+def test_projection_context_signal_checks_all_pairs_and_exposes_sanitized_turns() -> None:
+    key = ConversationKeyV1("platform", "bot", ScopeKind.PRIVATE, "user")
+    candidates = (
+        _candidate(key, 3, "umo-b"),
+        _candidate(key, 2, "umo-a"),
+        _candidate(key, 1, "umo-a"),
+    )
+    projection = InteractionTraceObservatoryProjectionV1(PassiveInteractionTraceV1())
+
+    assert projection._context_signal(candidates) == "YES"
+    sample = projection._context_sample(candidates)
+    assert sample is not None
+    assert sample["conversation_label"] == "C1"
+    assert [turn["legacy_umo_same_as_previous"] for turn in sample["turns"]] == [
+        "UNKNOWN",
+        "YES",
+        "NO",
+    ]
+    assert "umo-a" not in json.dumps(sample)
+    assert "umo-b" not in json.dumps(sample)
+
+
+def test_projection_context_signal_stable_and_missing_umo_are_conservative() -> None:
+    key = ConversationKeyV1("platform", "bot", ScopeKind.PRIVATE, "user")
+    projection = InteractionTraceObservatoryProjectionV1(PassiveInteractionTraceV1())
+    stable = tuple(_candidate(key, index, "stable") for index in (3, 2, 1))
+    missing = stable[:2] + (_candidate(key, 1, None),)
+
+    assert projection._context_signal(stable) == "NO"
+    assert projection._context_signal(missing) == "INCONCLUSIVE"
+    stable_sample = projection._context_sample(stable)
+    assert stable_sample is not None
+    assert [turn["legacy_umo_same_as_previous"] for turn in stable_sample["turns"]] == [
+        "UNKNOWN",
+        "YES",
+        "YES",
+    ]
+
+
+def test_projection_sampling_keeps_single_debounce_control_and_output_classes() -> None:
+    key = ConversationKeyV1("platform", "bot", ScopeKind.PRIVATE, "user")
+    projection = InteractionTraceObservatoryProjectionV1(PassiveInteractionTraceV1())
+    candidates = (
+        _candidate(key, 4, "u4", raw_event_count=1, logical_host_results=1, actual_send_count=1),
+        _candidate(key, 3, "u3", raw_event_count=2, logical_host_results=2, actual_send_count=3),
+        _candidate(key, 2, "u2", raw_event_count=2, logical_host_results=1, actual_send_count=2),
+    )
+
+    debounce = projection._debounce_samples(candidates)
+    assert len(debounce) == 3
+    assert sum(item["raw_event_count"] == 1 for item in debounce) == 1
+    output = projection._output_samples(candidates)
+    assert len(output) == 3
+    assert output[0]["logical_host_results"] == 1
+    assert output[0]["actual_send_count"] == 2
+    assert any(
+        item["logical_host_results"] == 1 and item["actual_send_count"] == 1
+        for item in output
+    )
+    assert not (
+        output[1]["logical_host_results"] == 2
+        and output[1]["actual_send_count"] == 3
+    )
+
+
+def test_projection_summary_reports_determinate_traffic_only() -> None:
+    tracer = PassiveInteractionTraceV1()
+    tracer.observe_inbound(_Event("summary"), now=0.0)
+    projection = InteractionTraceObservatoryProjectionV1(tracer)
+    summary = projection.read_summary()
+
+    assert summary["signals"]["natural_traffic_sufficient"] is False
+    assert "legacy_umo_continuity" in summary["aggregate"]

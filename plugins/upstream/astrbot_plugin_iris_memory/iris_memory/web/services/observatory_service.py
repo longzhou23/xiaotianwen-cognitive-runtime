@@ -69,6 +69,7 @@ class P1ObservatoryService:
         execution_observatory: ExecutionRecordObservatory | None = None,
         p2r0_store: Any | None = None,
         runtime_state: Mapping[str, Any] | None = None,
+        interaction_trace_reader: Any | None = None,
     ) -> None:
         self._episode_store = episode_store
         self._review_store = review_store
@@ -79,6 +80,7 @@ class P1ObservatoryService:
         # records are reported as unavailable rather than reconstructed.
         self._execution_records = dict(execution_records or {})
         self._execution_observatory = execution_observatory
+        self._interaction_trace_reader = interaction_trace_reader
 
     @property
     def available(self) -> bool:
@@ -116,6 +118,7 @@ class P1ObservatoryService:
         review_runs_value: int | str = len(runs) if review_data_available else "Unavailable"
         findings_value: int | str = sum(len(run.findings) for run in runs) if review_data_available else "Unavailable"
         evidence_value: int | str = evidence_count if review_data_available else "Unavailable"
+        interaction_trace = self._interaction_trace_projection()
         return {
             "available": True,
             "phase": phase,
@@ -162,12 +165,32 @@ class P1ObservatoryService:
                 ),
             },
             "semantic_evaluator": self._runtime_state.get("semantic_evaluator"),
+            "interaction_trace": interaction_trace,
             "behavioral_learning": {
                 "enabled": self._state_bool("p2b_enabled"),
                 "status": "ENABLED" if self._state_bool("p2b_enabled") else "DISABLED",
                 "label": "P2b 尚未启用",
             },
         }
+
+    def _interaction_trace_projection(self) -> dict[str, Any]:
+        if self._interaction_trace_reader is None:
+            return {
+                "schema_version": "p2x.interaction-observatory.v1",
+                "available": False,
+                "reason": "interaction_trace_not_bound",
+            }
+        try:
+            payload = self._interaction_trace_reader.read_summary()
+            if not isinstance(payload, Mapping) or payload.get("schema_version") != "p2x.interaction-observatory.v1":
+                raise ValueError("invalid_interaction_trace_projection")
+            return dict(payload)
+        except Exception:
+            return {
+                "schema_version": "p2x.interaction-observatory.v1",
+                "available": False,
+                "reason": "interaction_trace_read_failed",
+            }
 
     def list_episodes(
         self, *, state: str | None = None, query: str | None = None, limit: int = 50, offset: int = 0
@@ -547,7 +570,7 @@ class P1ObservatoryService:
     @staticmethod
     def _unavailable_summary() -> dict[str, Any]:
         unavailable = "Unavailable"
-        return {"available": False, "reason": "episode_store_not_wired", "episodes": unavailable, "finalized_episodes": unavailable, "outcomes": unavailable, "review_runs": unavailable, "review_findings": unavailable, "review_evidence": unavailable, "review_store": "UNAVAILABLE", "review_run_count_source": unavailable, "finding_count_source": unavailable, "evidence_count_source": unavailable, "preview_available": False, "lifecycle": {"enabled": False, "status": "UNAVAILABLE"}, "review": {"enabled": False, "status": "UNAVAILABLE"}, "promotion": {"enabled": False, "status": "UNAVAILABLE", "rules": [], "rule_count": 0, "reason": "episode_store_not_wired"}, "behavioral_learning": {"enabled": False, "status": "DISABLED", "label": "P2b 尚未启用"}}
+        return {"available": False, "reason": "episode_store_not_wired", "episodes": unavailable, "finalized_episodes": unavailable, "outcomes": unavailable, "review_runs": unavailable, "review_findings": unavailable, "review_evidence": unavailable, "review_store": "UNAVAILABLE", "review_run_count_source": unavailable, "finding_count_source": unavailable, "evidence_count_source": unavailable, "preview_available": False, "lifecycle": {"enabled": False, "status": "UNAVAILABLE"}, "review": {"enabled": False, "status": "UNAVAILABLE"}, "promotion": {"enabled": False, "status": "UNAVAILABLE", "rules": [], "rule_count": 0, "reason": "episode_store_not_wired"}, "behavioral_learning": {"enabled": False, "status": "DISABLED", "label": "P2b 尚未启用"}, "interaction_trace": {"schema_version": "p2x.interaction-observatory.v1", "available": False, "reason": "interaction_trace_not_bound"}}
 
     def _demo_fixture(self, case_id: str) -> tuple[Episode, tuple[OutcomeObservation, ...], dict[str, BehaviorExecutionRecord]]:
         now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)

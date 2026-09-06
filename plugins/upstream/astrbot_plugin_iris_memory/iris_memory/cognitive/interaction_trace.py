@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+from itertools import pairwise
 from types import MappingProxyType
 
 TRACE_SCHEMA_VERSION = "p2x.interaction-trace.v1"
@@ -583,10 +584,204 @@ class PassiveInteractionTraceV1:
         return f"turn:v1:{hashlib.sha256(_canonical_json(payload)).hexdigest()}"
 
 
+class InteractionTraceObservatoryProjectionV1:
+    """Privacy-safe, read-only projection over one live passive tracer.
+
+    The projection deliberately keeps the tracer reference supplied by the
+    composition root.  It never constructs a tracer, observes new events, or
+    exposes raw identities/content to the web read model.
+    """
+
+    schema_version = "p2x.interaction-observatory.v1"
+
+    def __init__(self, trace: PassiveInteractionTraceV1) -> None:
+        if not isinstance(trace, PassiveInteractionTraceV1):
+            raise TypeError("interaction trace projection requires PassiveInteractionTraceV1")
+        self._trace = trace
+
+    def read_summary(self) -> dict[str, object]:
+        now = time.monotonic()
+        metrics = self._trace.snapshot(now=now)
+        completed = self._trace.completed_candidates(now=now)
+        candidates = tuple(reversed(completed))
+        debounce = self._debounce_signal(candidates)
+        context = self._context_signal(candidates)
+        output = self._output_signal(candidates)
+        return {
+            "schema_version": self.schema_version,
+            "available": True,
+            "mode": "PASSIVE",
+            "correlation_level": "CONVERSATION_WINDOW",
+            "window": {
+                "completed_candidates_retained": len(completed),
+                "active_candidates": metrics.active_candidate_turns,
+                "completed_capacity": self._trace.max_completed_traces,
+                "quiet_window_seconds": self._trace.quiet_window_seconds,
+                "state_ttl_seconds": self._trace.state_ttl_seconds,
+            },
+            "aggregate": {
+                "raw_events": metrics.raw_events,
+                "candidate_turns": metrics.candidate_turns,
+                "actual_host_executions": metrics.actual_host_executions,
+                "legacy_umo_continuity": metrics.legacy_umo_continuity,
+                "logical_host_results": metrics.logical_host_results,
+                "actual_send_count": metrics.actual_send_count,
+                "h0_receipt_count": metrics.h0_receipt_count,
+                "raw_events_per_candidate_turn": metrics.raw_events_per_candidate_turn,
+                "host_executions_per_candidate_turn": metrics.host_executions_per_candidate_turn,
+                "sends_per_logical_host_result": metrics.sends_per_logical_host_result,
+            },
+            "signals": {
+                "debounce": debounce,
+                "context_continuity": context,
+                "output_split": output,
+                "natural_traffic_sufficient": all(
+                    signal != "INCONCLUSIVE" for signal in (debounce, context, output)
+                ),
+            },
+            "samples": {
+                "debounce": self._debounce_samples(candidates),
+                "context": self._context_sample(candidates),
+                "output": self._output_samples(candidates),
+            },
+        }
+
+    @staticmethod
+    def _candidate_counts(candidate: CandidateTurnTraceV1) -> dict[str, object]:
+        components: list[str] = []
+        has_reply = False
+        for envelope in candidate.raw_events:
+            for component in envelope.message_chain:
+                type_name = component.get("type")
+                if isinstance(type_name, str) and type_name not in components:
+                    components.append(type_name)
+            has_reply = has_reply or envelope.reply_metadata.get("has_reply") is True
+        return {
+            "scope_kind": candidate.conversation_key.scope_kind.value,
+            "raw_event_count": len(candidate.raw_events),
+            "component_types": components,
+            "has_reply": has_reply,
+            "actual_host_executions": candidate.actual_host_executions,
+            "logical_host_results": candidate.logical_host_results,
+            "actual_send_count": candidate.actual_send_count,
+            "h0_receipt_count": candidate.h0_receipt_count,
+        }
+
+    @classmethod
+    def _sample(cls, candidate: CandidateTurnTraceV1, index: int) -> dict[str, object]:
+        payload = cls._candidate_counts(candidate)
+        payload["conversation_label"] = f"C{index}"
+        payload["turn_label"] = f"T{index}"
+        return payload
+
+    @classmethod
+    def _debounce_samples(cls, candidates: tuple[CandidateTurnTraceV1, ...]) -> list[dict[str, object]]:
+        selected = [candidate for candidate in candidates if len(candidate.raw_events) >= 2][:5]
+        single = next((candidate for candidate in candidates if len(candidate.raw_events) == 1), None)
+        if single is not None:
+            selected.append(single)
+        return [cls._sample(candidate, index) for index, candidate in enumerate(selected, 1)]
+
+    @classmethod
+    def _output_samples(cls, candidates: tuple[CandidateTurnTraceV1, ...]) -> list[dict[str, object]]:
+        qualifying = [candidate for candidate in candidates if candidate.logical_host_results >= 1]
+        selected: list[CandidateTurnTraceV1] = []
+        amplification = next(
+            (
+                candidate
+                for candidate in qualifying
+                if candidate.logical_host_results == 1 and candidate.actual_send_count > 1
+            ),
+            None,
+        )
+        non_amplification = next(
+            (
+                candidate
+                for candidate in qualifying
+                if candidate.actual_send_count <= candidate.logical_host_results
+            ),
+            None,
+        )
+        for candidate in (amplification, non_amplification):
+            if candidate is not None and candidate not in selected:
+                selected.append(candidate)
+        selected.extend(candidate for candidate in qualifying if candidate not in selected)
+        selected = selected[:5]
+        return [cls._sample(candidate, index) for index, candidate in enumerate(selected, 1)]
+
+    @staticmethod
+    def _debounce_signal(candidates: tuple[CandidateTurnTraceV1, ...]) -> str:
+        qualifying = [candidate for candidate in candidates if len(candidate.raw_events) >= 2]
+        if any(candidate.actual_host_executions > 1 for candidate in candidates):
+            return "YES"
+        if qualifying and all(candidate.actual_host_executions <= 1 for candidate in qualifying):
+            return "NO"
+        return "INCONCLUSIVE"
+
+    @staticmethod
+    def _context_signal(candidates: tuple[CandidateTurnTraceV1, ...]) -> str:
+        sequence = InteractionTraceObservatoryProjectionV1._context_sequence(candidates)
+        if sequence is None:
+            return "INCONCLUSIVE"
+        umos = [candidate.raw_events[0].legacy_umo for candidate in sequence]
+        if any(umo is None for umo in umos):
+            return "INCONCLUSIVE"
+        if any(previous != current for previous, current in pairwise(umos)):
+            return "YES"
+        return "NO"
+
+    @staticmethod
+    def _context_sequence(
+        candidates: tuple[CandidateTurnTraceV1, ...],
+    ) -> list[CandidateTurnTraceV1] | None:
+        grouped: dict[ConversationKeyV1, list[CandidateTurnTraceV1]] = {}
+        for candidate in candidates:
+            grouped.setdefault(candidate.conversation_key, []).append(candidate)
+        qualifying = [
+            sequence
+            for sequence in grouped.values()
+            if len(sequence) >= 3 and sequence[0].conversation_key.scope_kind is ScopeKind.PRIVATE
+        ]
+        if not qualifying:
+            return None
+        return max(
+            qualifying,
+            key=lambda sequence: sequence[0].raw_events[0].observed_order,
+        )[::-1]
+
+    @staticmethod
+    def _output_signal(candidates: tuple[CandidateTurnTraceV1, ...]) -> str:
+        qualifying = [candidate for candidate in candidates if candidate.logical_host_results >= 1]
+        if any(candidate.logical_host_results == 1 and candidate.actual_send_count > 1 for candidate in qualifying):
+            return "YES"
+        if qualifying and all(candidate.actual_send_count <= candidate.logical_host_results for candidate in qualifying):
+            return "NO"
+        return "INCONCLUSIVE"
+
+    @classmethod
+    def _context_sample(cls, candidates: tuple[CandidateTurnTraceV1, ...]) -> dict[str, object] | None:
+        sequence = cls._context_sequence(candidates)
+        if sequence is None:
+            return None
+        turns: list[dict[str, object]] = []
+        previous_umo: str | None = None
+        for index, candidate in enumerate(sequence, 1):
+            umo = candidate.raw_events[0].legacy_umo
+            continuity = "UNKNOWN" if index == 1 or previous_umo is None or umo is None else (
+                "YES" if previous_umo == umo else "NO"
+            )
+            turn = cls._candidate_counts(candidate)
+            turn["turn_label"] = f"T{index}"
+            turn["legacy_umo_same_as_previous"] = continuity
+            turns.append(turn)
+            previous_umo = umo
+        return {"conversation_label": "C1", "turns": turns}
+
 __all__ = [
     "CandidateTurnTraceV1",
     "ConversationKeyV1",
     "InteractionTraceMetricsV1",
+    "InteractionTraceObservatoryProjectionV1",
     "PassiveInteractionTraceV1",
     "RawEventEnvelopeV1",
     "ScopeKind",

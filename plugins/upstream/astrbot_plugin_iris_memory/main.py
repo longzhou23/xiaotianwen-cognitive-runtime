@@ -53,6 +53,7 @@ from iris_memory.cognitive.explicit_correction_rule import (
     ExplicitCorrectionProductionPromoterV1,
 )
 from iris_memory.cognitive.interaction_trace import (
+    InteractionTraceObservatoryProjectionV1,
     InteractionTraceMetricsV1,
     PassiveInteractionTraceV1,
 )
@@ -258,6 +259,7 @@ class IrisMemoryPlugin(Star):
             # and observes existing lifecycle callbacks without owning any
             # event, request, result, or send operation.
             self._interaction_trace = PassiveInteractionTraceV1()
+            self._interaction_trace_observatory = InteractionTraceObservatoryProjectionV1(self._interaction_trace)
             self._reply_in_progress: dict[str, float] = {}
             self._passive_active: dict[str, float] = {}
             self._triggering: dict[str, float] = {}
@@ -489,6 +491,9 @@ class IrisMemoryPlugin(Star):
             # P2b is intentionally outside this Observatory's current
             # authority surface; keep the status explicit and read-only.
             runtime.observatory_p2b_enabled = False
+            runtime.observatory_interaction_trace = getattr(
+                self, "_interaction_trace_observatory", None
+            )
         except Exception:
             # A missing observability projection must never affect cognition or
             # plugin startup.  Routes will report unavailable state instead.
@@ -775,6 +780,13 @@ class IrisMemoryPlugin(Star):
         """插件卸载清理"""
         logger.info("开始关闭插件组件...")
         interaction_trace = getattr(self, "_interaction_trace", None)
+        projection = getattr(self, "_interaction_trace_observatory", None)
+        try:
+            runtime = get_cognitive_runtime()
+            if getattr(runtime, "observatory_interaction_trace", None) is projection:
+                runtime.observatory_interaction_trace = None
+        except Exception:
+            logger.debug("interaction trace observability cleanup skipped", exc_info=True)
         if interaction_trace is not None:
             interaction_trace.close()
         if self._episode_lifecycle_owner is not None:

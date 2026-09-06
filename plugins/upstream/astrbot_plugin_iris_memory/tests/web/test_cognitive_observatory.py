@@ -454,3 +454,41 @@ async def test_listed_open_episode_id_round_trips_through_encoded_route(monkeypa
     assert preview["evidence_count"] == 0
     assert store.get_episode(episode_id) == episode_before
     assert store.get_outcomes(episode_id) == outcomes_before
+
+
+def test_summary_projects_sanitized_interaction_trace_reader() -> None:
+    from iris_memory.cognitive.interaction_trace import (
+        InteractionTraceObservatoryProjectionV1,
+        PassiveInteractionTraceV1,
+    )
+
+    store, _episode, _outcomes, _records = _fixture(outcome_kind=None)
+    tracer = PassiveInteractionTraceV1()
+    reader = InteractionTraceObservatoryProjectionV1(tracer)
+    summary = P1ObservatoryService(
+        store,
+        interaction_trace_reader=reader,
+    ).summary()
+    assert summary["interaction_trace"]["available"] is True
+    assert summary["interaction_trace"]["schema_version"] == "p2x.interaction-observatory.v1"
+
+
+def test_summary_reports_unbound_or_failed_interaction_trace_reader() -> None:
+    store, _episode, _outcomes, _records = _fixture(outcome_kind=None)
+    unbound = P1ObservatoryService(store).summary()
+    assert unbound["interaction_trace"] == {
+        "schema_version": "p2x.interaction-observatory.v1",
+        "available": False,
+        "reason": "interaction_trace_not_bound",
+    }
+
+    class BrokenReader:
+        def read_summary(self):
+            raise RuntimeError("must not leak")
+
+    failed = P1ObservatoryService(store, interaction_trace_reader=BrokenReader()).summary()
+    assert failed["interaction_trace"] == {
+        "schema_version": "p2x.interaction-observatory.v1",
+        "available": False,
+        "reason": "interaction_trace_read_failed",
+    }

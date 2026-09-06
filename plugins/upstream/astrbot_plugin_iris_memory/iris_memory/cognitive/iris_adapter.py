@@ -304,6 +304,7 @@ class CognitiveRuntime:
         self.observatory_promotion_rules: tuple[str, ...] = ()
         self.observatory_semantic_evaluator: str | None = None
         self.observatory_p2b_enabled = False
+        self.observatory_interaction_trace: Any | None = None
 
     def run_behavior(
         self,

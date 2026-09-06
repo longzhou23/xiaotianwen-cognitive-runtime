@@ -18,6 +18,7 @@ def get_observatory_service() -> P1ObservatoryService:
         review_store=getattr(runtime, "observatory_review_store", None),
         p2r0_store=getattr(runtime, "observatory_p2r0_store", None),
         execution_observatory=getattr(runtime, "execution_observatory", None),
+        interaction_trace_reader=getattr(runtime, "observatory_interaction_trace", None),
         runtime_state={
             "lifecycle_enabled": getattr(runtime, "observatory_lifecycle_enabled", False),
             "review_enabled": getattr(runtime, "observatory_review_enabled", False),
