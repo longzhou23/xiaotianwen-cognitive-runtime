@@ -199,6 +199,31 @@ def test_append_replay_and_idempotent_create(tmp_path):
     assert restarted.all_candidates() == (candidate,)
 
 
+def test_candidate_identity_is_order_independent_and_reobservation_is_idempotent(tmp_path):
+    scope = _scope()
+    evidence = _evidence(scope=scope)
+    evaluator = ShadowCandidateEvaluator()
+    first = evaluator.evaluate(
+        scope=scope,
+        parameter=BehaviorParameter.RESPONSE_LENGTH,
+        evidence=evidence,
+        now=NOW,
+    )
+    later = evaluator.evaluate(
+        scope=scope,
+        parameter=BehaviorParameter.RESPONSE_LENGTH,
+        evidence=tuple(reversed(evidence)),
+        now=NOW + timedelta(hours=1),
+    )
+    assert later.candidate_id == first.candidate_id
+    assert later.evidence == first.evidence
+    path = tmp_path / "behavior-candidates.jsonl"
+    store = AppendOnlyBehaviorCandidateStore(path)
+    store.append_candidate(first)
+    assert store.append_candidate(later) == first
+    assert len(path.read_bytes().splitlines()) == 1
+
+
 def test_approve_changes_only_candidate_journal_and_never_publishes(tmp_path):
     path = tmp_path / "behavior-candidates.jsonl"
     candidate = _candidate(parameter=BehaviorParameter.RELATIONSHIP_FAMILIARITY, value="FAMILIAR")
@@ -287,6 +312,38 @@ def test_expiration_is_durable_and_blocks_later_approval(tmp_path):
     assert AppendOnlyBehaviorCandidateStore(path).get(candidate.candidate_id).status is CandidateStatus.EXPIRED  # type: ignore[union-attr]
 
 
+def test_conflicted_candidate_can_expire(tmp_path):
+    scope = _scope()
+    candidate = ShadowCandidateEvaluator().evaluate(
+        scope=scope,
+        parameter=BehaviorParameter.RESPONSE_LENGTH,
+        evidence=(
+            CandidateEvidence("episode-one", "evidence-one", scope, BehaviorParameter.RESPONSE_LENGTH, "BRIEF"),
+            CandidateEvidence("episode-two", "evidence-two", scope, BehaviorParameter.RESPONSE_LENGTH, "DETAILED"),
+        ),
+        now=NOW,
+        expires_at=NOW + timedelta(hours=1),
+    )
+    store = AppendOnlyBehaviorCandidateStore(tmp_path / "conflict-expiry.jsonl")
+    store.append_candidate(candidate)
+    assert store.expire_due(now=NOW + timedelta(hours=2))[0].status is CandidateStatus.EXPIRED
+
+
+def test_transition_reason_is_closed_and_cannot_store_message_text(tmp_path):
+    candidate = _candidate()
+    path = tmp_path / "closed-reason.jsonl"
+    store = AppendOnlyBehaviorCandidateStore(path)
+    store.append_candidate(candidate)
+    before = path.read_bytes()
+    with pytest.raises(BehaviorCandidateValidationError, match="closed TransitionReason"):
+        store.approve(
+            candidate.candidate_id,
+            actor="admin:fictional",
+            reason="please remember this fictional message body",
+        )
+    assert path.read_bytes() == before
+
+
 def test_checksum_and_hash_chain_tampering_fails_closed(tmp_path):
     path = tmp_path / "behavior-candidates.jsonl"
     store = AppendOnlyBehaviorCandidateStore(path)
@@ -320,6 +377,32 @@ def test_file_lock_unavailable_fails_closed(monkeypatch, tmp_path):
         store.all_candidates()
 
 
+def test_real_file_lock_contention_fails_closed_without_journal_write(tmp_path):
+    path = tmp_path / "behavior-candidates.jsonl"
+    store = AppendOnlyBehaviorCandidateStore(path)
+    with module._exclusive_file_lock(path):
+        with pytest.raises(BehaviorCandidateStorageError, match="lock unavailable"):
+            store.append_candidate(_candidate())
+    assert not path.exists()
+
+
+def test_fsync_failure_poisons_store_and_prevents_followup_writes(monkeypatch, tmp_path):
+    path = tmp_path / "behavior-candidates.jsonl"
+    store = AppendOnlyBehaviorCandidateStore(path)
+
+    def fail_fsync(_fd):
+        raise OSError("fictional fsync failure")
+
+    monkeypatch.setattr(module.os, "fsync", fail_fsync)
+    with pytest.raises(BehaviorCandidateStorageError, match="fail-closed"):
+        store.append_candidate(_candidate())
+    size_after_failure = path.stat().st_size
+    assert not store.available
+    with pytest.raises(BehaviorCandidateStorageError, match="uncertain write"):
+        store.append_candidate(_candidate(user="user-b"))
+    assert path.stat().st_size == size_after_failure
+
+
 def test_journal_contains_only_contract_fields_and_no_message_body(tmp_path):
     path = tmp_path / "behavior-candidates.jsonl"
     candidate = _candidate(parameter=BehaviorParameter.MEMORY_RETRIEVAL_STYLE, value="DEFAULT")
@@ -347,3 +430,14 @@ def test_candidate_payload_rejects_extra_message_field():
     payload["message"] = "fictional message body must never be stored"
     with pytest.raises(BehaviorCandidateIntegrityError):
         BehaviorCandidate.from_payload(payload)
+
+
+def test_journal_replay_rejects_unknown_envelope_field(tmp_path):
+    path = tmp_path / "unknown-field.jsonl"
+    store = AppendOnlyBehaviorCandidateStore(path)
+    store.append_candidate(_candidate())
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["message"] = "fictional body"
+    path.write_bytes(module._canonical_bytes(record) + b"\n")
+    with pytest.raises(BehaviorCandidateIntegrityError, match="journal record keys"):
+        AppendOnlyBehaviorCandidateStore(path)

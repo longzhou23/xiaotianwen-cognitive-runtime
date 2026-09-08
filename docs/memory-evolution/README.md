@@ -18,7 +18,7 @@
 | 2、6：唯一 Persona / SELF | AstrBot Persona 单一权威；身份 SELF 解析；Persona 候选后显式批准 | 不自动发布 Persona；生产本轮带入了禁止 auto Job 自动发布的代码 |
 | 3–5、7：Entity、alias、共指与主体视角 | UID 优先、歧义 fail-closed、SELF/OTHER/UNKNOWN 投影 | R07 已解冻：Identity 单一 owner 持久化；alias 仅人工确认并可按 claim ID 撤销，不以昵称自动补造 |
 | 9–15：状态、关系、情绪、多时间尺度 | 明确私聊 FAMILIAR 候选、7天人工批准；affection 独占 Affect | R11 已解冻为 60 秒脱敏只读快照；不新增信任、亲密度或隐式关系推断 |
-| 16、24、25、30、31：BehavioralPrior / 长期学习 | 受控回复偏好记录、明确纠正门槛、人工巩固、scope/期限/撤销 | R10 已将人工批准偏好投影为最小 prior；自动发布时间、奖励学习和权限扩张仍关闭 |
+| 16、24、25、30、31：BehavioralPrior / 长期学习 | 受控回复偏好记录、明确纠正门槛、P2b shadow 候选、人工批准和显式发布、scope/期限/撤销 | R10 已将人工批准偏好投影为最小 prior；P2b V1 只允许管理员把经当前证据重验的 SHORT 候选显式发布到既有偏好存储；自动批准、自动发布、奖励学习和权限扩张仍关闭 |
 | 17、32：Episode/Outcome/Review | 生命周期、完成协调、精确链事实、复盘职责已有实现 | 真实 Host/平台完整链仍未演练；不能以回复数量当奖励，也不补造历史证据 |
 | 18：Situation | Trigger YES 后冻结 owner 提供的版本化只读投影 | R08 已解冻；缺失、过期、scope 不符均为空，不从 legacy 字段推断长期状态 |
 | 19–23：Silence/Trigger/Decision/Execution | 现有 Host 路径；管理员群级插话抑制；工具提示按批准 scope 消费 | 全部平台真实行为未验证；不启用通用“是否/何时回复”学习 |
@@ -53,9 +53,17 @@ Iris 异步初始化完成，容器运行且 WebUI HTTP 200。FAISS 的 AVX2 变
 - R07/R08/R10/R11：维护者已明确解冻，按 Identity/ProfileStorage/affection 既有 owner 分别接线；没有合并为通用学习框架。
 - 结构自演化与历史重解释：已形成[独立后续设计](structural-evolution-and-history-reinterpretation.md)，不接入通用学习框架或自动历史迁移。
 
+## P2b Explicit Publish V1
+
+P2b 继续默认只生成 shadow candidate，`auto_approve=false`、`auto_publish=false`。管理员可先使用 `p2b_inspect <candidate_id>` 查看状态和当前证据是否仍有效，再依次执行 `p2b_approve <candidate_id>` 与 `p2b_publish <candidate_id> CONFIRM`。发布入口只接受权威 journal 中仍为 APPROVED、未过期、完整 private UID scope 的 `response_length=SHORT`；它会重新聚合当前无正文观察和 Episode 映射，确认 exact-chain candidate ID 未变化后，调用 Host 的限定 CAS 写入既有 `response_style_preference:v1`。
+
+同一候选重复发布不会新增记录或延长 7 天期限。CAS 冲突、Host 缺少 CAS、证据失效、参数越界或存储异常均不回报成功；若 CAS 已提交而读回失败，会明确返回 `committed_unverified`，要求先检查现有记录。已发布候选不能直接执行 `p2b_revoke`，必须先用 `p2b_unpublish <candidate_id> CONFIRM` 原子撤回对应确定性发布记录，再撤销 shadow 生命周期。该闭环不会写 Persona、Affect、Relationship、工具权限或 Participation。
+
+本地使用虚构数据完成 `73 + 125` 项聚焦回归，覆盖发布前后、跨 scope、重复发布、冲突、过期、无 CAS、读回失败、显式撤回、精确链和请求 Hook。没有发布真实候选、执行 L28 历史写或发送真实消息。
+
 ## 验证口径
 
-本轮没有运行 pytest、真实消息发送、Provider 样例或恢复演练。仅执行 Python 语法检查、适用静态检查、文档链接检查和 Git diff 检查。历史卡中的测试数字仅属于其记录日期，不能算作本轮新增代码的验证。
+P2b Explicit Publish V1 已运行上述聚焦 pytest；真实消息发送、Provider 样例和恢复演练仍未执行。历史卡中的测试数字仅属于其记录日期，不能算作其他新增代码的验证。
 
 本轮构建结果：71 个相关 Python 文件语法检查通过；新增 R04 文件、main.py 和反馈测试文件 Ruff F 检查通过；`npm run build:check` 的 Vue 类型检查及 Vite 生产构建通过，已同步打包页面。构建有大于 600 kB 的现有图表 vendor chunk 提示，不影响构建完成。新增和历史测试均未在本轮运行。
 

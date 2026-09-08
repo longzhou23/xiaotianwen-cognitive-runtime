@@ -732,10 +732,12 @@ G4：Observatory。
 
 - [x] 新增冻结的 `p2b-shadow-candidate.v1` 契约和 checksummed append-only journal；支持重启重放、幂等创建、跨进程非阻塞文件锁、批准/拒绝/撤销/冲突/过期状态机，损坏或不确定写入时 fail-closed。
 - [x] 生产 composition 仅把满足既有 D02 门槛、完整 private UID scope 且能映射到至少两个不同 Episode 的 `response_length=SHORT` 精确反馈聚合投影为 PENDING shadow candidate。
-- [x] `auto_approve=false`、`auto_publish=false`、`permission_effect=NONE`；候选批准只更新 P2b journal，不写 ProfileStorage，不改变请求、工具权限、Participation、Persona、Affect 或 Relationship。
-- [x] 管理员入口复用 `iris_mem preference`：`p2b_status`、`p2b_evaluate`、`p2b_approve`、`p2b_reject`、`p2b_revoke`。观察台只显示模式、白名单、匿名状态计数和最近评估时间。
-- [ ] P2b candidate 到现有 `response_style_preference:v1` 的显式发布动作尚未开放；在定义逐参数映射与二次授权前，APPROVED shadow candidate 仍不会影响回复。
+- [x] `auto_approve=false`、`auto_publish=false`、`permission_effect=NONE`；候选批准只更新 P2b journal。只有管理员随后执行严格确认的显式发布命令，才可写入既有 ProfileStorage。
+- [x] 管理员入口复用 `iris_mem preference`：除 shadow 状态机外，新增 `p2b_inspect`、`p2b_publish <candidate_id> CONFIRM` 与 `p2b_unpublish <candidate_id> CONFIRM`。观察台继续只显示模式、白名单、匿名状态计数和最近评估时间。
+- [x] P2b Explicit Publish V1 仅映射 `response_length=SHORT`、完整 private UID scope、APPROVED 且未过期的权威候选。发布前重读 append-only journal、重建当前 exact-chain evidence，并用 Host CAS 写入 `response_style_preference:v1`；重复发布不延期，冲突/缺 CAS/失效均零写入。发布记录必须先显式撤回，才能撤销 shadow 候选。
 - [ ] 通用 ReviewEvidence 映射继续关闭：当前 `ReviewEvidence.scope` 不含完整 platform/account/user/conversation 权威范围，不能安全泛化为用户偏好。
+
+本地验证：P2b journal 与 ProfileStorage/命令 `73 passed, 1 warning`；Episode、archive、精确回复链、反馈观察、请求 Hook 和观察台组合回归 `125 passed, 1 warning`。测试全部使用虚构数据，没有发布真实候选、写真实历史记录或发送平台消息。
 
 
 ### R04 管理入口补齐

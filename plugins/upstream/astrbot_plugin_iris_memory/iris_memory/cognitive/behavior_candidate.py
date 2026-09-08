@@ -71,6 +71,15 @@ class PermissionEffect(str, Enum):
     NONE = "none"
 
 
+class TransitionReason(str, Enum):
+    """Closed lifecycle reasons; free-form message text is never accepted."""
+
+    MANUAL_APPROVAL = "manual_approval"
+    MANUAL_REJECTION = "manual_rejection"
+    MANUAL_REVOCATION = "manual_revocation"
+    TTL_ELAPSED = "ttl_elapsed"
+
+
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VALUE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:-]{0,63}$")
 
@@ -92,6 +101,15 @@ def _value_token(value: object) -> str:
             "proposed_value must be a closed uppercase token"
         )
     return normalized
+
+
+def _transition_reason(value: object) -> str:
+    try:
+        return TransitionReason(value).value  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise BehaviorCandidateValidationError(
+            "reason must be a closed TransitionReason"
+        ) from exc
 
 
 def _utc_datetime(value: object, field_name: str) -> datetime:
@@ -128,6 +146,13 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256(value: object) -> str:
     return "sha256:" + hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def exact_chain_evidence_id(ref: tuple[str, str, str, str]) -> str:
+    """Return one opaque ID for the complete exact reply-feedback chain."""
+    if type(ref) is not tuple or len(ref) != 4 or any(type(item) is not str or not item for item in ref):
+        raise BehaviorCandidateValidationError("exact chain requires four non-empty identifiers")
+    return "evidence:p2b:" + hashlib.sha256(_canonical_bytes(list(ref))).hexdigest()[:32]
 
 
 def _required_keys(value: object, expected: set[str], label: str) -> dict[str, object]:
@@ -280,7 +305,14 @@ class BehaviorCandidate:
         if type(self.status) is not CandidateStatus:
             raise BehaviorCandidateValidationError("status must be CandidateStatus")
         object.__setattr__(self, "proposed_value", _value_token(self.proposed_value))
-        evidence = tuple(self.evidence)
+        evidence = tuple(
+            sorted(
+                self.evidence,
+                key=lambda item: (item.episode_id, item.evidence_id)
+                if type(item) is CandidateEvidence
+                else ("", ""),
+            )
+        )
         if not evidence or any(type(item) is not CandidateEvidence for item in evidence):
             raise BehaviorCandidateValidationError(
                 "candidate evidence must contain CandidateEvidence items"
@@ -304,9 +336,10 @@ class BehaviorCandidate:
             if self.status not in {
                 CandidateStatus.CONFLICTED,
                 CandidateStatus.REJECTED,
+                CandidateStatus.EXPIRED,
             }:
                 raise BehaviorCandidateValidationError(
-                    "competing evidence may only be CONFLICTED or REJECTED"
+                    "competing evidence may only be CONFLICTED, REJECTED, or EXPIRED"
                 )
             if self.proposed_value != "UNRESOLVED":
                 raise BehaviorCandidateValidationError(
@@ -425,7 +458,14 @@ class ShadowCandidateEvaluator:
             raise BehaviorCandidateValidationError(
                 "parameter is outside the P2b allow-list"
             ) from exc
-        evidence_tuple = tuple(evidence)
+        evidence_tuple = tuple(
+            sorted(
+                evidence,
+                key=lambda item: (item.episode_id, item.evidence_id)
+                if type(item) is CandidateEvidence
+                else ("", ""),
+            )
+        )
         if any(type(item) is not CandidateEvidence for item in evidence_tuple):
             raise BehaviorCandidateValidationError(
                 "shadow evidence must contain CandidateEvidence items"
@@ -483,7 +523,9 @@ _TRANSITIONS: dict[CandidateStatus, frozenset[CandidateStatus]] = {
     ),
     CandidateStatus.REJECTED: frozenset(),
     CandidateStatus.REVOKED: frozenset(),
-    CandidateStatus.CONFLICTED: frozenset({CandidateStatus.REJECTED}),
+    CandidateStatus.CONFLICTED: frozenset(
+        {CandidateStatus.REJECTED, CandidateStatus.EXPIRED}
+    ),
     CandidateStatus.EXPIRED: frozenset(),
 }
 
@@ -669,7 +711,10 @@ class AppendOnlyBehaviorCandidateStore:
                         "invalid candidate transition order"
                     )
                 _token(transition["actor"], "actor")
-                _token(transition["reason"], "reason")
+                try:
+                    _transition_reason(transition["reason"])
+                except BehaviorCandidateValidationError as exc:
+                    raise BehaviorCandidateIntegrityError(str(exc)) from exc
                 occurred_at = _parse_datetime(transition["occurred_at"], "occurred_at")
                 candidates[candidate_id] = BehaviorCandidate(
                     candidate_id=current.candidate_id,
@@ -731,7 +776,7 @@ class AppendOnlyBehaviorCandidateStore:
         to_status: CandidateStatus,
         actor: str,
         occurred_at: datetime,
-        reason: str,
+        reason: TransitionReason | str,
     ) -> dict[str, object]:
         return {
             "candidate_id": candidate_id,
@@ -739,8 +784,23 @@ class AppendOnlyBehaviorCandidateStore:
             "to_status": to_status.value,
             "actor": _token(actor, "actor"),
             "occurred_at": _utc_datetime(occurred_at, "occurred_at").isoformat(),
-            "reason": _token(reason, "reason"),
+            "reason": _transition_reason(reason),
         }
+
+    @staticmethod
+    def _same_candidate_identity(
+        left: BehaviorCandidate, right: BehaviorCandidate
+    ) -> bool:
+        return (
+            left.candidate_id == right.candidate_id
+            and left.scope == right.scope
+            and left.parameter is right.parameter
+            and left.proposed_value == right.proposed_value
+            and left.evidence == right.evidence
+            and left.permission_effect is PermissionEffect.NONE
+            and right.permission_effect is PermissionEffect.NONE
+            and left.schema_version == right.schema_version
+        )
 
     def append_candidate(self, candidate: BehaviorCandidate) -> BehaviorCandidate:
         self._ensure_available()
@@ -757,7 +817,7 @@ class AppendOnlyBehaviorCandidateStore:
             candidates, previous_hash = self._read_locked()
             existing = candidates.get(candidate.candidate_id)
             if existing is not None:
-                if existing != candidate:
+                if not self._same_candidate_identity(existing, candidate):
                     raise BehaviorCandidateIntegrityError(
                         "candidate identity has conflicting payload"
                     )
@@ -779,13 +839,13 @@ class AppendOnlyBehaviorCandidateStore:
         target: CandidateStatus,
         *,
         actor: str,
-        reason: str,
+        reason: TransitionReason | str,
         now: datetime | None,
     ) -> BehaviorCandidate:
         self._ensure_available()
         candidate_id = _token(candidate_id, "candidate_id")
         actor = _token(actor, "actor")
-        reason = _token(reason, "reason")
+        reason = _transition_reason(reason)
         occurred_at = _utc_datetime(now or datetime.now(timezone.utc), "now")
         with _exclusive_file_lock(self.path):
             candidates, previous_hash = self._read_locked()
@@ -798,7 +858,11 @@ class AppendOnlyBehaviorCandidateStore:
             if (
                 current.expires_at is not None
                 and occurred_at >= current.expires_at
-                and current.status in {CandidateStatus.PENDING, CandidateStatus.APPROVED}
+                and current.status in {
+                    CandidateStatus.PENDING,
+                    CandidateStatus.APPROVED,
+                    CandidateStatus.CONFLICTED,
+                }
                 and target is not CandidateStatus.EXPIRED
             ):
                 expiry_payload = self._transition_payload(
@@ -807,7 +871,7 @@ class AppendOnlyBehaviorCandidateStore:
                     CandidateStatus.EXPIRED,
                     "system:expiry",
                     occurred_at,
-                    "ttl_elapsed",
+                    TransitionReason.TTL_ELAPSED,
                 )
                 previous_hash = self._append_locked(
                     record_type="CANDIDATE_STATUS_CHANGED",
@@ -861,7 +925,7 @@ class AppendOnlyBehaviorCandidateStore:
         *,
         actor: str,
         now: datetime | None = None,
-        reason: str = "manual_approval",
+        reason: TransitionReason | str = TransitionReason.MANUAL_APPROVAL,
     ) -> BehaviorCandidate:
         return self._transition(
             candidate_id, CandidateStatus.APPROVED, actor=actor, reason=reason, now=now
@@ -873,7 +937,7 @@ class AppendOnlyBehaviorCandidateStore:
         *,
         actor: str,
         now: datetime | None = None,
-        reason: str = "manual_rejection",
+        reason: TransitionReason | str = TransitionReason.MANUAL_REJECTION,
     ) -> BehaviorCandidate:
         return self._transition(
             candidate_id, CandidateStatus.REJECTED, actor=actor, reason=reason, now=now
@@ -885,7 +949,7 @@ class AppendOnlyBehaviorCandidateStore:
         *,
         actor: str,
         now: datetime | None = None,
-        reason: str = "manual_revocation",
+        reason: TransitionReason | str = TransitionReason.MANUAL_REVOCATION,
     ) -> BehaviorCandidate:
         return self._transition(
             candidate_id, CandidateStatus.REVOKED, actor=actor, reason=reason, now=now
@@ -902,7 +966,11 @@ class AppendOnlyBehaviorCandidateStore:
                 if (
                     current.expires_at is None
                     or current.expires_at > current_time
-                    or current.status not in {CandidateStatus.PENDING, CandidateStatus.APPROVED}
+                    or current.status not in {
+                        CandidateStatus.PENDING,
+                        CandidateStatus.APPROVED,
+                        CandidateStatus.CONFLICTED,
+                    }
                 ):
                     continue
                 payload = self._transition_payload(
@@ -911,7 +979,7 @@ class AppendOnlyBehaviorCandidateStore:
                     CandidateStatus.EXPIRED,
                     "system:expiry",
                     current_time,
-                    "ttl_elapsed",
+                    TransitionReason.TTL_ELAPSED,
                 )
                 previous_hash = self._append_locked(
                     record_type="CANDIDATE_STATUS_CHANGED",
@@ -971,4 +1039,6 @@ __all__ = [
     "PermissionEffect",
     "PrivateUIDScope",
     "ShadowCandidateEvaluator",
+    "TransitionReason",
+    "exact_chain_evidence_id",
 ]

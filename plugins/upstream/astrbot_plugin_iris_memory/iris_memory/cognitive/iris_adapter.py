@@ -321,6 +321,7 @@ class CognitiveRuntime:
         self.observatory_p2b_shadow_store: Any | None = None
         self.observatory_p2b_shadow_last_evaluation_at: float | None = None
         self.p2b_shadow_evaluate: Any | None = None
+        self.p2b_shadow_validate: Any | None = None
         self.observatory_host_cas_available = False
         self.observatory_feedback_observer: Any | None = None
         self.observatory_projection_counts: dict[str, int] = {

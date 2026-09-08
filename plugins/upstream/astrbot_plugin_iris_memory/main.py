@@ -48,6 +48,7 @@ from iris_memory.cognitive.behavior_candidate import (
     CandidateEvidence,
     PrivateUIDScope,
     ShadowCandidateEvaluator,
+    exact_chain_evidence_id,
 )
 from iris_memory.cognitive.episode import EpisodeState
 from iris_memory.cognitive.episode_lifecycle import (
@@ -534,21 +535,28 @@ class IrisMemoryPlugin(Star):
             for aggregate in observer.aggregates():
                 if not aggregate.eligible or aggregate.parameter != "response_length":
                     continue
+                scope = aggregate.scope
+                candidate_scope = PrivateUIDScope(
+                    platform_id=scope.platform_id,
+                    account_id=scope.account_id,
+                    user_id=scope.user_id,
+                    conversation_id=scope.conversation_id,
+                )
                 evidence = tuple(
-                    CandidateEvidence(source_episode[ref[0]], ref[2])
+                    CandidateEvidence(
+                        source_episode[ref[0]],
+                        exact_chain_evidence_id(ref),
+                        candidate_scope,
+                        BehaviorParameter.RESPONSE_LENGTH,
+                        aggregate.value,
+                    )
                     for ref in aggregate.feedback_refs
                     if ref[0] in source_episode
                 )
                 if len({item.episode_id for item in evidence}) < 2:
                     continue
-                scope = aggregate.scope
                 candidate = self._p2b_shadow_evaluator.evaluate(
-                    scope=PrivateUIDScope(
-                        platform_id=scope.platform_id,
-                        account_id=scope.account_id,
-                        user_id=scope.user_id,
-                        conversation_id=scope.conversation_id,
-                    ),
+                    scope=candidate_scope,
                     parameter=BehaviorParameter.RESPONSE_LENGTH,
                     proposed_value=aggregate.value,
                     evidence=evidence,
@@ -561,6 +569,52 @@ class IrisMemoryPlugin(Star):
             logger.exception("P2b shadow evaluation failed closed; no preference was published")
         self._sync_observatory_runtime_state()
         return created
+
+    def _validate_p2b_shadow_candidate(self, candidate_id: str) -> bool:
+        """Rebuild current eligible inputs before any explicit publication."""
+        store = self._p2b_shadow_store
+        if store is None:
+            return False
+        self._run_p2b_shadow_evaluation()
+        candidate = store.get(candidate_id)
+        if candidate is None:
+            return False
+        observer = self._response_length_feedback
+        episode_store = self._episode_store
+        if observer is None or episode_store is None:
+            return False
+        source_episode = {
+            outcome.source_event_id: outcome.target_episode_id
+            for outcome in episode_store.get_outcomes()
+            if outcome.source_event_id
+        }
+        for aggregate in observer.aggregates():
+            if not aggregate.eligible:
+                continue
+            scope = aggregate.scope
+            candidate_scope = PrivateUIDScope(
+                scope.platform_id, scope.account_id, scope.user_id, scope.conversation_id
+            )
+            evidence = tuple(
+                CandidateEvidence(
+                    source_episode[ref[0]], exact_chain_evidence_id(ref), candidate_scope,
+                    BehaviorParameter.RESPONSE_LENGTH, aggregate.value,
+                )
+                for ref in aggregate.feedback_refs if ref[0] in source_episode
+            )
+            if len({item.episode_id for item in evidence}) < 2:
+                continue
+            rebuilt = self._p2b_shadow_evaluator.evaluate(
+                scope=candidate_scope,
+                parameter=BehaviorParameter.RESPONSE_LENGTH,
+                proposed_value=aggregate.value,
+                evidence=evidence,
+                now=candidate.created_at,
+                expires_at=candidate.expires_at,
+            )
+            if rebuilt.candidate_id == candidate_id:
+                return True
+        return False
 
     def _sync_observatory_runtime_state(self) -> None:
         """Publish read-only effective-state references for Observatory routes.
@@ -613,6 +667,7 @@ class IrisMemoryPlugin(Star):
             runtime.observatory_p2b_shadow_store = self._p2b_shadow_store
             runtime.observatory_p2b_shadow_last_evaluation_at = self._p2b_shadow_last_evaluation_at
             runtime.p2b_shadow_evaluate = self._run_p2b_shadow_evaluation
+            runtime.p2b_shadow_validate = self._validate_p2b_shadow_candidate
         except Exception:
             # A missing observability projection must never affect cognition or
             # plugin startup.  Routes will report unavailable state instead.

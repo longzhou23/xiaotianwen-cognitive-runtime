@@ -103,7 +103,10 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             "p2b_evaluate": "立即执行一次影子评估；不批准、不发布",
             "p2b_approve <candidate_id>": "批准 shadow 候选；仍不发布到回复偏好",
             "p2b_reject <candidate_id>": "拒绝 shadow 候选",
-            "p2b_revoke <candidate_id>": "撤销 shadow 候选",
+            "p2b_revoke <candidate_id>": "撤销未发布的 shadow 候选",
+            "p2b_inspect <candidate_id>": "发布前检查权威候选与当前证据，不显示 scope 明细",
+            "p2b_publish <candidate_id> CONFIRM": "显式发布已批准且仍有效的 SHORT 候选",
+            "p2b_unpublish <candidate_id> CONFIRM": "撤回该候选发布的回复偏好",
         }
 
     def _storage(self) -> ProfileStorage | None:
@@ -123,7 +126,7 @@ class ResponsePreferenceCommandHandler(CommandHandler):
         sub_command: str | None = None,
     ) -> CommandResult:
         if sub_command and sub_command.startswith("p2b_"):
-            return self._p2b_operation(event, sub_command, args)
+            return await self._p2b_operation(event, sub_command, args)
         storage = self._storage()
         if storage is None:
             return CommandResult(False, "回复表达偏好存储不可用（需要启用 profile）")
@@ -165,7 +168,7 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             return CommandResult(True, self.get_help_text())
         return CommandResult(False, f"未知的子指令: {sub_command}\n{self.get_help_text()}")
 
-    def _p2b_operation(
+    async def _p2b_operation(
         self, event: AstrMessageEvent, operation: str, args: ParsedArgs
     ) -> CommandResult:
         from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
@@ -192,12 +195,68 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             candidate_id = _candidate_arg(args)
             if not candidate_id:
                 return CommandResult(False, f"用法: iris_mem preference {operation} <candidate_id>")
+            store.expire_due()
+            candidate = store.get(candidate_id)
+            if candidate is None:
+                return CommandResult(False, "P2b 候选不存在；请从 p2b_status 复制完整 ID")
+            validate = getattr(runtime, "p2b_shadow_validate", None)
+            if operation == "p2b_inspect":
+                current = bool(callable(validate) and validate(candidate_id))
+                return CommandResult(
+                    True,
+                    f"{candidate.candidate_id} | {candidate.status.value} | "
+                    f"{candidate.parameter.value}={candidate.proposed_value} | "
+                    f"evidence={len(candidate.evidence)} | current_evidence={'VALID' if current else 'INVALID'} | "
+                    "permission_effect=NONE",
+                )
+            if operation in {"p2b_publish", "p2b_unpublish"}:
+                if len(args.raw_args) != 3 or args.raw_args[2] != "CONFIRM":
+                    return CommandResult(
+                        False,
+                        f"用法: iris_mem preference {operation} <candidate_id> CONFIRM",
+                    )
+                storage = self._storage()
+                if storage is None:
+                    return CommandResult(False, "回复表达偏好存储不可用（需要启用 profile）")
+                actor = _actor_id(event)
+                if operation == "p2b_publish":
+                    if not callable(validate) or not validate(candidate_id):
+                        return CommandResult(False, "候选的当前精确证据链无效；零写入")
+                    result = await storage.publish_p2b_candidate(candidate, actor)
+                    messages = {
+                        "published": f"✅ 已显式发布 {candidate_id}；仅影响对应私聊 scope，7 天后过期",
+                        "already_published": f"ℹ️ {candidate_id} 已有确定的发布记录，没有重复写入或延期",
+                        "not_approved": "候选尚未批准；请先执行 p2b_approve，零写入",
+                        "expired": "候选已经过期；零写入",
+                        "unsupported": "候选参数不在显式发布白名单内；零写入",
+                        "conflict": "对应 scope 已有冲突偏好；零写入",
+                        "committed_unverified": "发布可能已经提交，但读回验证失败；请先用 status 检查，禁止直接重试",
+                        "storage_failed": "发布存储失败，未确认生效",
+                    }
+                else:
+                    result = await storage.unpublish_p2b_candidate(candidate, actor)
+                    messages = {
+                        "unpublished": f"✅ 已撤回 {candidate_id} 发布的回复偏好；后续请求恢复默认表达",
+                        "already_unpublished": f"ℹ️ {candidate_id} 的发布记录已撤回，没有重复写入",
+                        "not_found": "未找到该候选的确定发布记录；零写入",
+                        "conflict": "发布记录状态冲突；零写入",
+                        "unsupported": "该候选没有可撤回的显式发布映射；零写入",
+                        "committed_unverified": "撤回可能已经提交，但读回验证失败；请先用 status 检查，禁止直接重试",
+                        "storage_failed": "撤回存储失败，未确认生效",
+                    }
+                return CommandResult(result.success, messages.get(result.code, f"操作失败（{result.code}）"))
             actor = _actor_id(event)
             if operation == "p2b_approve":
                 item = store.approve(candidate_id, actor=actor)
             elif operation == "p2b_reject":
                 item = store.reject(candidate_id, actor=actor)
             elif operation == "p2b_revoke":
+                storage = self._storage()
+                if storage is not None and await storage.find_p2b_publication(candidate) is not None:
+                    return CommandResult(
+                        False,
+                        f"{candidate_id} 已有发布记录；请先执行 p2b_unpublish {candidate_id} CONFIRM",
+                    )
                 item = store.revoke(candidate_id, actor=actor)
             else:
                 return CommandResult(False, f"未知的 P2b 子指令: {operation}")

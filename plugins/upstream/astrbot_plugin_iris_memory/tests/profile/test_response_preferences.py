@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from iris_memory.cognitive.behavior_candidate import (
+    AppendOnlyBehaviorCandidateStore,
+    BehaviorParameter,
+    CandidateEvidence,
+    CandidateStatus,
+    PrivateUIDScope,
+    ShadowCandidateEvaluator,
+)
+from iris_memory.commands.base import ParsedArgs
 from iris_memory.cognitive.response_preference_feedback import (
     RESPONSE_LENGTH_FEEDBACK_AGGREGATION_ELIGIBLE_REASON,
     ResponseLengthFeedbackAggregateV1,
@@ -37,6 +48,7 @@ from iris_memory.profile.response_preferences import (
     RESPONSE_LENGTH_PARAMETER,
     RESPONSE_PREFERENCE_KV_KEY,
     RESPONSE_PREFERENCE_MARKER,
+    P2B_EXPLICIT_PUBLISH_SOURCE_KIND,
     REVOKED,
     SHORT,
     SUSPENDED,
@@ -330,6 +342,48 @@ def _storage() -> tuple[ProfileStorage, _KV]:
     storage = ProfileStorage(backend)
     storage._is_available = True
     return storage, backend
+
+
+def _p2b_candidate(
+    *,
+    user_id: str = "p2b-user-a",
+    parameter: BehaviorParameter = BehaviorParameter.RESPONSE_LENGTH,
+    value: str = SHORT,
+    status: CandidateStatus = CandidateStatus.APPROVED,
+    expires_at: datetime | None = None,
+):
+    if expires_at is None:
+        expires_at = datetime.fromtimestamp(200.0, timezone.utc)
+    scope = PrivateUIDScope(
+        platform_id="napcat-instance-1",
+        account_id="bot-1",
+        user_id=user_id,
+        conversation_id=user_id,
+    )
+    candidate = ShadowCandidateEvaluator().evaluate(
+        scope=scope,
+        parameter=parameter,
+        proposed_value=value,
+        evidence=(
+            CandidateEvidence(
+                "episode-p2b-one",
+                "evidence-p2b-one",
+                scope,
+                parameter,
+                value,
+            ),
+            CandidateEvidence(
+                "episode-p2b-two",
+                "evidence-p2b-two",
+                scope,
+                parameter,
+                value,
+            ),
+        ),
+        now=datetime.fromtimestamp(100.0, timezone.utc),
+        expires_at=expires_at,
+    )
+    return replace(candidate, status=status)
 
 
 @pytest.mark.asyncio
@@ -1612,3 +1666,212 @@ async def test_l13_complete_local_demo_with_fixed_clock():
     records = await restarted.list_response_preferences()
     assert len(records) == 1
     assert records[0].status == REVOKED
+
+
+@pytest.mark.asyncio
+async def test_p2b_explicit_publish_requires_approved_short_candidate_and_is_idempotent():
+    storage, backend = _storage()
+    pending = _p2b_candidate(status=CandidateStatus.PENDING)
+
+    before = await storage.publish_p2b_candidate(pending, "maintainer", now=110.0)
+    assert not before.success and before.code == "not_approved"
+    assert await storage.list_response_preferences() == []
+
+    approved = replace(pending, status=CandidateStatus.APPROVED)
+    published = await storage.publish_p2b_candidate(
+        approved, "maintainer", now=110.0
+    )
+    assert published.success and published.code == "published"
+    assert published.record is not None
+    assert published.record.status == APPROVED
+    assert published.record.parameter == RESPONSE_LENGTH_PARAMETER
+    assert published.record.value == SHORT
+    assert published.record.source.source_kind == P2B_EXPLICIT_PUBLISH_SOURCE_KIND
+    assert published.record.source.source_event_id.startswith("p2b:")
+    assert published.record.expires_at == 110.0 + 7 * 24 * 60 * 60
+    assert backend.put_calls == 1  # publication used CAS, not put_kv_data
+
+    repeated = await storage.publish_p2b_candidate(
+        approved, "another-maintainer", now=111.0
+    )
+    assert repeated.success and repeated.code == "already_published"
+    assert repeated.record is not None
+    assert repeated.record.candidate_id == published.record.candidate_id
+    assert len(await storage.list_response_preferences()) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2b_explicit_publish_keeps_private_uid_scopes_isolated():
+    storage, _ = _storage()
+    first = _p2b_candidate(user_id="p2b-user-a")
+    second = _p2b_candidate(user_id="p2b-user-b")
+
+    assert (await storage.publish_p2b_candidate(first, "maintainer", now=110.0)).code == "published"
+    second_result = await storage.publish_p2b_candidate(second, "maintainer", now=110.0)
+    assert second_result.success and second_result.code == "published"
+    records = await storage.list_response_preferences()
+    assert len(records) == 2
+    assert {record.scope.user_id for record in records} == {"p2b-user-a", "p2b-user-b"}
+
+
+@pytest.mark.asyncio
+async def test_p2b_explicit_publish_fails_closed_on_conflict_and_unsupported_candidate():
+    storage, _ = _storage()
+    event = _Event(
+        message_id="p2b-conflict",
+        sender_id="p2b-user-a",
+        message="管理员创建的冲突候选",
+    )
+    pending_default = await storage.request_response_preference(
+        event, "DEFAULT", parameter=RESPONSE_LENGTH_PARAMETER, now=100.0
+    )
+    assert pending_default.code == "pending"
+
+    conflicting = await storage.publish_p2b_candidate(
+        _p2b_candidate(user_id="p2b-user-a"), "maintainer", now=110.0
+    )
+    assert not conflicting.success and conflicting.code == "conflict"
+    assert len(await storage.list_response_preferences()) == 1
+
+    unsupported = await storage.publish_p2b_candidate(
+        _p2b_candidate(
+            parameter=BehaviorParameter.ANSWER_STRUCTURE,
+            value="CONCLUSION_FIRST",
+        ),
+        "maintainer",
+        now=110.0,
+    )
+    assert not unsupported.success and unsupported.code == "unsupported"
+
+
+@pytest.mark.asyncio
+async def test_p2b_explicit_publish_rejects_expired_candidate_and_missing_cas():
+    storage, backend = _storage()
+    expired = _p2b_candidate(
+        expires_at=datetime.fromtimestamp(110.0, timezone.utc),
+    )
+    result = await storage.publish_p2b_candidate(expired, "maintainer", now=110.0)
+    assert not result.success and result.code == "expired"
+    assert await storage.list_response_preferences() == []
+
+    backend.compare_and_swap_kv_data = None  # type: ignore[method-assign]
+    cas_result = await storage.publish_p2b_candidate(
+        _p2b_candidate(user_id="p2b-user-c"), "maintainer", now=110.0
+    )
+    assert not cas_result.success and cas_result.code == "storage_failed"
+    assert await storage.list_response_preferences() == []
+
+
+@pytest.mark.asyncio
+async def test_p2b_explicit_unpublish_revokes_only_the_deterministic_publication():
+    storage, _ = _storage()
+    candidate = _p2b_candidate()
+    published = await storage.publish_p2b_candidate(candidate, "maintainer", now=110.0)
+    assert published.code == "published"
+    located = await storage.find_p2b_publication(candidate)
+    assert located is not None and located.status == APPROVED
+
+    removed = await storage.unpublish_p2b_candidate(candidate, "maintainer", now=120.0)
+    assert removed.success is True and removed.code == "unpublished"
+    assert removed.record is not None and removed.record.status == REVOKED
+    repeated = await storage.unpublish_p2b_candidate(candidate, "maintainer", now=121.0)
+    assert repeated.success is True and repeated.code == "already_unpublished"
+
+
+@pytest.mark.asyncio
+async def test_p2b_publish_reports_committed_unverified_after_cas_readback_failure():
+    class _ReadbackFailureKV(_KV):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cas_done = False
+
+        async def get_kv_data(self, key: str, default: object) -> object:
+            if self.cas_done:
+                raise OSError("fixture readback failure")
+            return await super().get_kv_data(key, default)
+
+        async def compare_and_swap_kv_data(
+            self, key: str, expected: object, value: object
+        ) -> bool:
+            committed = await super().compare_and_swap_kv_data(key, expected, value)
+            self.cas_done = committed
+            return committed
+
+    backend = _ReadbackFailureKV()
+    storage = ProfileStorage(backend)
+    storage._is_available = True
+    result = await storage.publish_p2b_candidate(
+        _p2b_candidate(), "maintainer", now=110.0
+    )
+    assert result.success is False
+    assert result.code == "committed_unverified"
+    assert RESPONSE_PREFERENCE_KV_KEY in backend.values
+
+
+@pytest.mark.asyncio
+async def test_p2b_admin_publish_requires_confirmation_and_current_authoritative_evidence(
+    tmp_path,
+):
+    storage, _ = _storage()
+    candidate_store = AppendOnlyBehaviorCandidateStore(tmp_path / "p2b.jsonl")
+    candidate = _p2b_candidate(
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+    candidate_store.append_candidate(replace(candidate, status=CandidateStatus.PENDING))
+    candidate_store.approve(candidate.candidate_id, actor="reviewer")
+    runtime = SimpleNamespace(
+        observatory_p2b_shadow_store=candidate_store,
+        p2b_shadow_validate=lambda candidate_id: candidate_id == candidate.candidate_id,
+    )
+    handler = ResponsePreferenceCommandHandler()
+    event = _Event(message_id="p2b-admin")
+    manager = _Manager(storage)
+
+    with (
+        patch(
+            "iris_memory.commands.response_preference_handler.get_component_manager",
+            return_value=manager,
+        ),
+        patch(
+            "iris_memory.cognitive.iris_adapter.get_cognitive_runtime",
+            return_value=runtime,
+        ),
+    ):
+        missing_confirmation = await handler.handle(
+            event,
+            ParsedArgs(raw_args=["p2b_publish", candidate.candidate_id]),
+            "p2b_publish",
+        )
+        assert missing_confirmation.success is False
+        assert await storage.find_p2b_publication(candidate) is None
+
+        runtime.p2b_shadow_validate = lambda _candidate_id: False
+        invalid = await handler.handle(
+            event,
+            ParsedArgs(raw_args=["p2b_publish", candidate.candidate_id, "CONFIRM"]),
+            "p2b_publish",
+        )
+        assert invalid.success is False and "零写入" in invalid.message
+        assert await storage.find_p2b_publication(candidate) is None
+
+        runtime.p2b_shadow_validate = lambda candidate_id: candidate_id == candidate.candidate_id
+        published = await handler.handle(
+            event,
+            ParsedArgs(raw_args=["p2b_publish", candidate.candidate_id, "CONFIRM"]),
+            "p2b_publish",
+        )
+        assert published.success is True and "显式发布" in published.message
+
+        blocked_revoke = await handler.handle(
+            event,
+            ParsedArgs(raw_args=["p2b_revoke", candidate.candidate_id]),
+            "p2b_revoke",
+        )
+        assert blocked_revoke.success is False and "p2b_unpublish" in blocked_revoke.message
+
+        unpublished = await handler.handle(
+            event,
+            ParsedArgs(raw_args=["p2b_unpublish", candidate.candidate_id, "CONFIRM"]),
+            "p2b_unpublish",
+        )
+        assert unpublished.success is True and "恢复默认表达" in unpublished.message

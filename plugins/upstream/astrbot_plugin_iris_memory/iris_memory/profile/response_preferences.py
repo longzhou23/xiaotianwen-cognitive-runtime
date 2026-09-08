@@ -56,6 +56,7 @@ STORED_STATUSES = frozenset({PENDING, APPROVED, REVOKED, SUSPENDED, SUPERSEDED})
 
 SOURCE_KIND = "EXPLICIT_CONTROLLED_REQUEST"
 RESPONSE_LENGTH_FEEDBACK_AGGREGATE_SOURCE_KIND = "RESPONSE_LENGTH_FEEDBACK_AGGREGATE"
+P2B_EXPLICIT_PUBLISH_SOURCE_KIND = "P2B_EXPLICIT_PUBLISH"
 RESPONSE_PREFERENCE_MARKER = "<iris:response_style_preference>"
 TOOL_PREFERENCE_MARKER = "<iris:tool_preference>"
 _DETAIL_REQUEST_PATTERN = re.compile(
@@ -313,6 +314,7 @@ class ResponsePreferenceSource:
         if self.source_kind not in {
             SOURCE_KIND,
             RESPONSE_LENGTH_FEEDBACK_AGGREGATE_SOURCE_KIND,
+            P2B_EXPLICIT_PUBLISH_SOURCE_KIND,
         }:
             raise ResponsePreferenceIntegrityError("unknown response preference source kind")
         object.__setattr__(self, "source_event_id", _strict_text(self.source_event_id, "source_event_id"))
@@ -566,6 +568,62 @@ def source_from_response_length_feedback_aggregate(
     return ResponsePreferenceSource(
         source_kind=RESPONSE_LENGTH_FEEDBACK_AGGREGATE_SOURCE_KIND,
         source_event_id=f"l09:{digest}",
+    )
+
+
+def source_from_p2b_behavior_candidate(
+    candidate: object,
+) -> ResponsePreferenceSource | None:
+    """Create the deterministic source for one explicit P2b publication.
+
+    The source is derived from the immutable candidate identity and its
+    message-free evidence references.  Lifecycle timestamps and status are
+    deliberately excluded so replaying the same approved candidate produces
+    the same response-preference candidate ID.
+    """
+
+    from iris_memory.cognitive.behavior_candidate import (
+        BehaviorCandidate,
+        BehaviorParameter,
+        CandidateStatus,
+    )
+
+    if type(candidate) is not BehaviorCandidate:
+        return None
+    if candidate.status is not CandidateStatus.APPROVED:
+        return None
+    if candidate.parameter is not BehaviorParameter.RESPONSE_LENGTH:
+        return None
+    if candidate.proposed_value != SHORT:
+        return None
+    identity_payload = {
+        "schema_version": "p2b-explicit-publish.v1",
+        "candidate_id": candidate.candidate_id,
+        "scope": candidate.scope.to_payload(),
+        "parameter": candidate.parameter.value,
+        "proposed_value": candidate.proposed_value,
+        "evidence": [
+            {
+                "episode_id": item.episode_id,
+                "evidence_id": item.evidence_id,
+                "scope": item.scope.to_payload(),
+                "parameter": item.parameter.value,
+                "proposed_value": item.proposed_value,
+            }
+            for item in candidate.evidence
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return ResponsePreferenceSource(
+        source_kind=P2B_EXPLICIT_PUBLISH_SOURCE_KIND,
+        source_event_id=f"p2b:{digest}",
     )
 
 

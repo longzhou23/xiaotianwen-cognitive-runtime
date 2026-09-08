@@ -42,6 +42,7 @@ from .response_preferences import (
     RESPONSE_PREFERENCE_KV_KEY,
     RESPONSE_PREFERENCE_SCHEMA_VERSION,
     REVOKED,
+    SHORT,
     SUPERSEDED,
     SUSPENDED,
     PreferenceOperationResult,
@@ -56,6 +57,7 @@ from .response_preferences import (
     normalize_response_preference_value,
     scope_from_event,
     source_from_event,
+    source_from_p2b_behavior_candidate,
     source_from_response_length_feedback_aggregate,
 )
 
@@ -63,6 +65,11 @@ if TYPE_CHECKING:
     pass
 
 logger = get_logger("profile")
+_MISSING = object()
+
+
+class ResponsePreferenceCommittedUnverifiedError(ResponsePreferenceIntegrityError):
+    """CAS committed, but the required post-commit readback was unavailable."""
 
 
 @dataclass(frozen=True)
@@ -1003,7 +1010,11 @@ class ProfileStorage(Component):
         return _decode_response_preference_payload(raw)
 
     async def _save_response_preference_records(
-        self, records: list[ResponsePreferenceRecord]
+        self,
+        records: list[ResponsePreferenceRecord],
+        *,
+        expected_raw: object = _MISSING,
+        require_cas: bool = False,
     ) -> bool:
         """Persist and read back before reporting a successful mutation."""
 
@@ -1011,16 +1022,232 @@ class ProfileStorage(Component):
             "schema_version": RESPONSE_PREFERENCE_SCHEMA_VERSION,
             "records": [record.to_dict() for record in records],
         }
-        await self._storage.put_kv_data(RESPONSE_PREFERENCE_KV_KEY, payload)
-        saved = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
-        if not isinstance(saved, dict) or set(saved) != {"schema_version", "records"}:
-            raise ResponsePreferenceIntegrityError("response preference write verification failed")
-        if saved["schema_version"] != RESPONSE_PREFERENCE_SCHEMA_VERSION:
-            raise ResponsePreferenceIntegrityError("response preference write schema mismatch")
-        decoded = [ResponsePreferenceRecord.from_dict(item) for item in saved["records"]]
-        if [record.to_dict() for record in decoded] != payload["records"]:
-            raise ResponsePreferenceIntegrityError("response preference write readback mismatch")
+        cas_committed = False
+        if require_cas:
+            compare_and_swap = getattr(self._storage, "compare_and_swap_kv_data", None)
+            if not callable(compare_and_swap):
+                raise ResponsePreferenceIntegrityError(
+                    "response preference conditional write unavailable"
+                )
+            if expected_raw is _MISSING:
+                expected_raw = await self._storage.get_kv_data(
+                    RESPONSE_PREFERENCE_KV_KEY, None
+                )
+            committed = await compare_and_swap(
+                RESPONSE_PREFERENCE_KV_KEY, expected_raw, payload
+            )
+            if committed is not True:
+                raise ResponsePreferenceIntegrityError(
+                    "response preference conditional write rejected"
+                )
+            cas_committed = True
+        else:
+            await self._storage.put_kv_data(RESPONSE_PREFERENCE_KV_KEY, payload)
+        try:
+            saved = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
+            if not isinstance(saved, dict) or set(saved) != {"schema_version", "records"}:
+                raise ResponsePreferenceIntegrityError("response preference write verification failed")
+            if saved["schema_version"] != RESPONSE_PREFERENCE_SCHEMA_VERSION:
+                raise ResponsePreferenceIntegrityError("response preference write schema mismatch")
+            decoded = [ResponsePreferenceRecord.from_dict(item) for item in saved["records"]]
+            if [record.to_dict() for record in decoded] != payload["records"]:
+                raise ResponsePreferenceIntegrityError("response preference write readback mismatch")
+        except Exception as exc:
+            if cas_committed:
+                raise ResponsePreferenceCommittedUnverifiedError(
+                    "response preference CAS committed but readback was not verified"
+                ) from exc
+            raise
         return True
+
+    async def publish_p2b_candidate(
+        self,
+        candidate: object,
+        published_by: object,
+        *,
+        now: float | None = None,
+    ) -> PreferenceOperationResult:
+        """Explicitly publish one approved P2b candidate into ProfileStorage.
+
+        V1 deliberately accepts only the response-length SHORT candidate.  A
+        publication is itself an explicit administrator action; it creates an
+        APPROVED response-preference record with the existing seven-day TTL
+        and writes it through the Host CAS API.  No other P2b parameter or
+        owner (Persona, Affect, Relationship, tools, or participation) is
+        reachable from this method.
+        """
+
+        if not self._is_available:
+            return PreferenceOperationResult(False, "storage_failed")
+        if type(published_by) is not str or not published_by.strip():
+            return PreferenceOperationResult(False, "storage_failed")
+
+        from iris_memory.cognitive.behavior_candidate import (
+            BehaviorCandidate,
+            BehaviorParameter,
+            CandidateStatus,
+        )
+
+        if type(candidate) is not BehaviorCandidate:
+            return PreferenceOperationResult(False, "unsupported")
+        if candidate.status is CandidateStatus.EXPIRED:
+            return PreferenceOperationResult(False, "expired")
+        if candidate.status is not CandidateStatus.APPROVED:
+            return PreferenceOperationResult(False, "not_approved")
+        if (
+            candidate.parameter is not BehaviorParameter.RESPONSE_LENGTH
+            or candidate.proposed_value != SHORT
+            or candidate.scope.scope_kind != "PRIVATE"
+        ):
+            return PreferenceOperationResult(False, "unsupported")
+
+        published_at = time.time() if now is None else float(now)
+        if candidate.expires_at is not None and (
+            candidate.expires_at.timestamp() <= published_at
+        ):
+            return PreferenceOperationResult(False, "expired")
+        source = source_from_p2b_behavior_candidate(candidate)
+        if source is None:
+            return PreferenceOperationResult(False, "unsupported")
+        try:
+            scope = ResponsePreferenceScope(
+                platform_id=candidate.scope.platform_id,
+                account_id=candidate.scope.account_id,
+                user_id=candidate.scope.user_id,
+                conversation_id=candidate.scope.conversation_id,
+                scope_kind=candidate.scope.scope_kind,
+            )
+            record = ResponsePreferenceRecord(
+                candidate_id=candidate_id_for(
+                    scope, source, SHORT, RESPONSE_LENGTH_PARAMETER
+                ),
+                scope=scope,
+                parameter=RESPONSE_LENGTH_PARAMETER,
+                value=SHORT,
+                source=source,
+                status=APPROVED,
+                requested_at=candidate.created_at.timestamp(),
+                approved_by=published_by.strip(),
+                approved_at=published_at,
+                expires_at=published_at + APPROVAL_TTL_SECONDS,
+            )
+            async with _response_preference_process_lock():
+                raw = await self._storage.get_kv_data(
+                    RESPONSE_PREFERENCE_KV_KEY, None
+                )
+                records = _decode_response_preference_payload(raw) if raw is not None else []
+                exact = next(
+                    (
+                        item
+                        for item in records
+                        if item.scope == scope
+                        and item.parameter == RESPONSE_LENGTH_PARAMETER
+                        and item.source == source
+                    ),
+                    None,
+                )
+                if exact is not None:
+                    return PreferenceOperationResult(True, "already_published", exact)
+                same_value = next(
+                    (
+                        item
+                        for item in records
+                        if item.scope == scope
+                        and item.parameter == RESPONSE_LENGTH_PARAMETER
+                        and item.value == SHORT
+                        and item.status == APPROVED
+                        and item.is_active(published_at)
+                    ),
+                    None,
+                )
+                if same_value is not None:
+                    return PreferenceOperationResult(True, "already_published", same_value)
+                conflicting = next(
+                    (
+                        item
+                        for item in records
+                        if item.scope == scope
+                        and item.parameter == RESPONSE_LENGTH_PARAMETER
+                        and item.value != SHORT
+                        and item.status in {PENDING, APPROVED}
+                        and (
+                            item.status == PENDING
+                            or item.is_active(published_at)
+                        )
+                    ),
+                    None,
+                )
+                if conflicting is not None:
+                    return PreferenceOperationResult(False, "conflict", conflicting)
+                await self._save_response_preference_records(
+                    [*records, record], expected_raw=raw, require_cas=True
+                )
+                return PreferenceOperationResult(True, "published", record)
+        except ResponsePreferenceCommittedUnverifiedError:
+            logger.exception("P2b 发布已提交但读回未验证")
+            return PreferenceOperationResult(False, "committed_unverified")
+        except Exception:
+            logger.exception("发布 P2b 回复长度候选失败")
+            return PreferenceOperationResult(False, "storage_failed")
+
+    async def find_p2b_publication(self, candidate: object) -> ResponsePreferenceRecord | None:
+        """Find the exact deterministic publication without exposing other scopes."""
+        source = source_from_p2b_behavior_candidate(candidate)
+        if source is None or not self._is_available:
+            return None
+        try:
+            scope = ResponsePreferenceScope(
+                candidate.scope.platform_id, candidate.scope.account_id,
+                candidate.scope.user_id, candidate.scope.conversation_id,
+                candidate.scope.scope_kind,
+            )
+            records = await self._load_response_preference_records()
+            matches = [item for item in records if item.scope == scope and item.source == source]
+            return matches[0] if len(matches) == 1 else None
+        except Exception:
+            return None
+
+    async def unpublish_p2b_candidate(
+        self, candidate: object, revoked_by: object, *, now: float | None = None
+    ) -> PreferenceOperationResult:
+        """CAS-revoke the exact response preference created by P2b publication."""
+        if type(revoked_by) is not str or not revoked_by.strip() or not self._is_available:
+            return PreferenceOperationResult(False, "storage_failed")
+        source = source_from_p2b_behavior_candidate(candidate)
+        if source is None:
+            return PreferenceOperationResult(False, "unsupported")
+        revoked_at = time.time() if now is None else float(now)
+        try:
+            scope = ResponsePreferenceScope(
+                candidate.scope.platform_id, candidate.scope.account_id,
+                candidate.scope.user_id, candidate.scope.conversation_id,
+                candidate.scope.scope_kind,
+            )
+            async with _response_preference_process_lock():
+                raw = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
+                records = _decode_response_preference_payload(raw) if raw is not None else []
+                indexes = [i for i, item in enumerate(records) if item.scope == scope and item.source == source]
+                if len(indexes) != 1:
+                    return PreferenceOperationResult(False, "not_found")
+                index = indexes[0]
+                current = records[index]
+                if current.status == REVOKED:
+                    return PreferenceOperationResult(True, "already_unpublished", current)
+                if current.status != APPROVED:
+                    return PreferenceOperationResult(False, "conflict", current)
+                records[index] = replace(
+                    current, status=REVOKED, revoked_by=revoked_by.strip(), revoked_at=revoked_at
+                )
+                await self._save_response_preference_records(
+                    records, expected_raw=raw, require_cas=True
+                )
+                return PreferenceOperationResult(True, "unpublished", records[index])
+        except ResponsePreferenceCommittedUnverifiedError:
+            logger.exception("P2b 撤回已提交但读回未验证")
+            return PreferenceOperationResult(False, "committed_unverified")
+        except Exception:
+            logger.exception("撤回 P2b 回复长度候选失败")
+            return PreferenceOperationResult(False, "storage_failed")
 
     async def dry_run_response_preference_revocation(
         self,
