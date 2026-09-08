@@ -171,6 +171,38 @@ class P1ObservatoryService:
                 "status": "ENABLED" if self._state_bool("p2b_enabled") else "DISABLED",
                 "label": "P2b 尚未启用",
             },
+            "adaptive_runtime": self._adaptive_runtime_projection(),
+        }
+
+    def _adaptive_runtime_projection(self) -> dict[str, Any]:
+        counts = self._runtime_state.get("projection_counts")
+        if not isinstance(counts, Mapping):
+            counts = {}
+        return {
+            "host_cas": {
+                "available": self._state_bool("host_cas_available"),
+                "scope": "response_style_preference:v1",
+            },
+            "feedback_replay": {
+                "available": self._state_bool("feedback_available"),
+                "observations": int(self._runtime_state.get("feedback_observations") or 0),
+                "mode": "append-only",
+            },
+            "identity": {
+                "available": self._state_bool("identity_available"),
+                "entities": self._runtime_state.get("identity_entities"),
+                "claims": self._runtime_state.get("identity_claims"),
+                "owner": "Identity/EntityRegistry",
+            },
+            "situation": {
+                "available": True,
+                "events": int(counts.get("events", 0) or 0),
+                "last_projection_at": self._runtime_state.get("last_projection_at"),
+            },
+            "relationship": {"available": True, "observed": int(counts.get("relationship", 0) or 0), "owner": "ProfileStorage"},
+            "behavioral_prior": {"available": True, "observed": int(counts.get("behavioral_prior", 0) or 0), "permission_effect": "none"},
+            "affect": {"available": True, "observed": int(counts.get("affect", 0) or 0), "owner": "astrbot_plugin_affection", "ttl_seconds": 60},
+            "history_write": {"status": "LOCKED", "reason": "exact_single_record_authorization_required"},
         }
 
     def _interaction_trace_projection(self) -> dict[str, Any]:

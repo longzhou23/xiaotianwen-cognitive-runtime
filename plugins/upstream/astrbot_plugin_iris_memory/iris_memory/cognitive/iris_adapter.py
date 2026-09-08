@@ -318,6 +318,15 @@ class CognitiveRuntime:
         self.observatory_semantic_evaluator: str | None = None
         self.observatory_p2b_enabled = False
         self.observatory_interaction_trace: Any | None = None
+        self.observatory_host_cas_available = False
+        self.observatory_feedback_observer: Any | None = None
+        self.observatory_projection_counts: dict[str, int] = {
+            "events": 0,
+            "relationship": 0,
+            "behavioral_prior": 0,
+            "affect": 0,
+        }
+        self.observatory_last_projection_at: float | None = None
 
     def bind_identity_store(self, storage_path: str | Path) -> None:
         """Bind the single durable Identity owner before handling events."""

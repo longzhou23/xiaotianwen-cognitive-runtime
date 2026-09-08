@@ -11,7 +11,8 @@
           <v-chip :color="statusColor(summary?.lifecycle?.status)" variant="flat" prepend-icon="mdi-timeline-check-outline">Lifecycle · {{ statusLabel(summary?.lifecycle?.status) }}</v-chip>
           <v-chip :color="statusColor(summary?.review?.status)" variant="tonal" prepend-icon="mdi-file-search-outline">Review · {{ statusLabel(summary?.review?.status) }}</v-chip>
           <v-chip :color="statusColor(summary?.promotion?.status)" variant="tonal" prepend-icon="mdi-gate">Promotion · {{ statusLabel(summary?.promotion?.status) }}</v-chip>
-          <v-chip color="grey" variant="tonal" prepend-icon="mdi-brain-off-outline">Behavioral Learning · DISABLED</v-chip>
+          <v-chip color="success" variant="tonal" prepend-icon="mdi-account-heart-outline">受控长期适应 · ENABLED</v-chip>
+          <v-chip color="grey" variant="tonal" prepend-icon="mdi-brain-off-outline">通用 P2b · DISABLED</v-chip>
         </div>
         <v-alert :color="summary?.promotion?.enabled ? 'info' : 'amber-darken-2'" variant="tonal" density="compact" class="mt-4 mb-0">
           <template v-if="summary?.promotion?.enabled">
@@ -39,7 +40,8 @@
         <v-chip size="small" :color="statusColor(summary.lifecycle?.status)">Lifecycle · {{ statusLabel(summary.lifecycle?.status) }}</v-chip>
         <v-chip size="small" :color="statusColor(summary.review?.status)">Review · {{ statusLabel(summary.review?.status) }}</v-chip>
         <v-chip size="small" :color="statusColor(summary.promotion?.status)">Promotion · {{ statusLabel(summary.promotion?.status) }}</v-chip>
-        <v-chip size="small" color="grey">Behavioral Learning · DISABLED</v-chip>
+        <v-chip size="small" color="success">受控长期适应 · ENABLED</v-chip>
+        <v-chip size="small" color="grey">通用 P2b · DISABLED</v-chip>
       </div>
       <div class="text-caption text-medium-emphasis mt-2">
          <span v-if="summary.review_store === 'UNAVAILABLE'">ReviewStore 当前不可用，计数不会以 0 代替。</span>
@@ -50,6 +52,23 @@
         <span v-if="summary.promotion?.enabled">允许规则：{{ summary.promotion?.rules?.join(', ') || '无' }}。</span>
         <span v-else>Promotion 未启用。</span>
       </div>
+    </v-card>
+
+    <v-card v-if="summary?.adaptive_runtime" variant="flat" class="panel pa-4 mb-3 adaptive-panel">
+      <div class="d-flex align-center flex-wrap ga-2 mb-3">
+        <div><div class="section-label mb-0">长期适应运行态</div><div class="text-caption text-medium-emphasis">只显示接线状态和匿名计数，不显示消息、用户、scope 或候选 ID。</div></div>
+        <v-spacer />
+        <v-chip :color="summary.adaptive_runtime.history_write?.status === 'LOCKED' ? 'amber-darken-2' : 'success'" size="small" prepend-icon="mdi-lock-outline">历史维护 · {{ summary.adaptive_runtime.history_write?.status }}</v-chip>
+      </div>
+      <v-row dense>
+        <v-col v-for="item in adaptiveCards" :key="item.label" cols="12" sm="6" lg="4">
+          <v-card variant="outlined" class="adaptive-card pa-3">
+            <div class="d-flex align-center ga-2"><v-icon :icon="item.icon" :color="item.ready ? 'success' : 'grey'" /><strong>{{ item.label }}</strong><v-spacer /><v-chip size="x-small" :color="item.ready ? 'success' : 'grey'">{{ item.ready ? '已接通' : '不可用' }}</v-chip></div>
+            <div class="text-body-2 mt-2">{{ item.value }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.detail }}</div>
+          </v-card>
+        </v-col>
+      </v-row>
+      <v-alert color="amber-darken-2" variant="tonal" density="compact" class="mt-3 mb-0">L28 历史数据写入仍锁定；仅在精确单条授权后开放。日常请求中的已批准偏好、关系熟悉度、BehavioralPrior 和 Affect 只读投影可继续生效。</v-alert>
     </v-card>
 
     <v-card v-if="!summary?.available" variant="flat" class="pa-7 text-center mb-3">
@@ -94,7 +113,7 @@
               <template v-if="viewMode === 'simple'">
                 <v-row>
                   <v-col cols="12" md="7"><v-card variant="outlined" class="pa-4 human-card"><div class="section-label">这段互动</div><div class="text-h6">{{ detail.human?.lifecycle_label }}</div><div class="text-body-2 text-medium-emphasis mt-1">小天文正在把同一段连续互动整理为可审计历史。</div><v-row class="mt-2" dense><v-col cols="6" sm="3"><div class="human-metric">{{ detail.human?.interaction_turns }}</div><div class="text-caption">互动轮次</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ detail.human?.host_outputs }}</div><div class="text-caption">实际回复</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ detail.human?.dispatches }}</div><div class="text-caption">成功发送</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ detail.human?.outcomes }}</div><div class="text-caption">观察结果</div></v-col></v-row></v-card></v-col>
-                  <v-col cols="12" md="5"><v-card variant="tonal" color="grey-darken-1" class="pa-4"><div class="section-label">长期学习</div><div class="text-h6">未启用（P2b）</div><div class="text-body-2 mt-1">ReviewFinding / ReviewEvidence 只记录历史观察，不会改变未来 Trigger、Participation、Intent、Persona、Affect、Relationship 或 BehavioralPrior。</div><v-chip size="small" class="mt-3" color="grey">P2b 尚未开始</v-chip></v-card></v-col>
+                  <v-col cols="12" md="5"><v-card variant="tonal" color="teal-darken-1" class="pa-4"><div class="section-label">长期适应</div><div class="text-h6">受控能力已接通</div><div class="text-body-2 mt-1">已批准的私聊偏好、关系熟悉度与 BehavioralPrior 可进入请求；Affect 仅采用 affection 提供的短期有效视图。通用 P2b 自动学习仍关闭。</div><v-chip size="small" class="mt-3" color="success">限定范围运行中</v-chip></v-card></v-col>
                 </v-row>
                 <v-row class="mt-1">
                   <v-col cols="12" md="6"><v-card variant="outlined" class="pa-4 human-card"><div class="section-label">认知判断</div><div v-if="detail.human?.no_intent" class="text-body-1">{{ detail.human.no_intent }} 次未形成明确主动发言意图</div><div v-else class="text-body-1">已记录 {{ detail.human?.cognitive_decisions || 0 }} 次认知判断</div><div class="text-caption text-medium-emphasis mt-2">这是只读的历史观察；它不拥有最终发送控制权，也不会改变未来行为。</div></v-card></v-col>
@@ -141,6 +160,17 @@ const summary = ref<any>(null); const episodes = ref<any[]>([]); const demos = r
 const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple')
 const phaseTitle = computed(() => summary.value?.phase || 'Cognitive Observatory')
 const summaryCards = computed(() => [{ label: 'Episodes', value: summary.value?.episodes ?? '—' }, { label: 'Finalized', value: summary.value?.finalized_episodes ?? '—' }, { label: 'Outcomes', value: summary.value?.outcomes ?? '—' }, { label: 'Review Runs', value: summary.value?.review_runs ?? '—' }, { label: 'Findings', value: summary.value?.review_findings ?? '—' }, { label: 'Evidence', value: summary.value?.review_evidence ?? '—' }])
+const adaptiveCards = computed(() => {
+  const a = summary.value?.adaptive_runtime || {}
+  return [
+    { label: 'Host 原子写', icon: 'mdi-database-lock-outline', ready: !!a.host_cas?.available, value: a.host_cas?.available ? 'CAS + 事务 + 读回' : 'Host API 未提供', detail: '仅限 response_style_preference:v1' },
+    { label: '反馈重放', icon: 'mdi-replay', ready: !!a.feedback_replay?.available, value: `${a.feedback_replay?.observations ?? 0} 条有效观察`, detail: 'append-only，跨重启恢复' },
+    { label: '身份库', icon: 'mdi-account-key-outline', ready: !!a.identity?.available, value: `${a.identity?.entities ?? '—'} 实体 · ${a.identity?.claims ?? '—'} 声明`, detail: 'Identity / EntityRegistry 单一 owner' },
+    { label: 'Situation 投影', icon: 'mdi-layers-triple-outline', ready: !!a.situation?.available, value: `${a.situation?.events ?? 0} 次请求投影`, detail: a.situation?.last_projection_at ? `最近 ${formatUnix(a.situation.last_projection_at)}` : '等待真实请求' },
+    { label: 'BehavioralPrior', icon: 'mdi-tune-variant', ready: !!a.behavioral_prior?.available, value: `${a.behavioral_prior?.observed ?? 0} 次命中`, detail: '只读表达偏好；不改变工具或回复权限' },
+    { label: 'Affect 视图', icon: 'mdi-heart-pulse', ready: !!a.affect?.available, value: `${a.affect?.observed ?? 0} 次有效投影`, detail: `affection owner · TTL ${a.affect?.ttl_seconds ?? 60}s` },
+  ]
+})
 const reviewStatusSummary = computed(() => {
   const counts = summary.value?.review_status_counts
   if (!counts || typeof counts !== 'object') return 'Unavailable'
@@ -152,6 +182,7 @@ const statusColor = (value?: string) => value === 'ENABLED' ? 'success' : value 
 const stateColor = (value: string) => value === 'FINALIZED' ? 'success' : value === 'OPEN' ? 'primary' : 'grey'
 const attachmentColor = (value: string) => value === 'ATTACHED' ? 'success' : value === 'REJECTED' ? 'error' : 'grey'
 const formatTime = (value?: string) => value ? value.replace('T', ' ').replace('+00:00', ' UTC') : '—'
+const formatUnix = (value?: number) => value ? new Date(value * 1000).toLocaleString() : '—'
 const pretty = (value: unknown) => JSON.stringify(value, null, 2)
 async function loadEpisodes() { loading.value = true; try { const result = await getObservatoryEpisodes({ state: state.value, query: query.value, limit: 50 }); episodes.value = result.episodes || [] } catch (e: any) { error.value = e.message || '读取 Episode 失败' } finally { loading.value = false } }
 async function loadAll() { error.value = ''; await Promise.all([getObservatorySummary().then(v => summary.value = v), getObservatoryDemoCases().then(v => demos.value = v), loadEpisodes()]).catch((e: any) => error.value = e.message || '加载失败') }
@@ -162,5 +193,5 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
+.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.adaptive-panel { background: linear-gradient(135deg, rgba(0, 137, 123, .06), rgba(124, 77, 255, .05)); }.adaptive-card { min-height: 116px; background: rgba(var(--v-theme-surface), .72); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
 </style>

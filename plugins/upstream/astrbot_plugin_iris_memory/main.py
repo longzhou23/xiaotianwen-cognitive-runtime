@@ -533,12 +533,16 @@ class IrisMemoryPlugin(Star):
             runtime.observatory_interaction_trace = getattr(
                 self, "_interaction_trace_observatory", None
             )
+            runtime.observatory_host_cas_available = callable(
+                getattr(self, "compare_and_swap_kv_data", None)
+            )
             # L09 remains review-only.  This shared reference lets the
             # existing admin preference command invoke the explicit L11
             # consolidator after ProfileStorage is ready; it is not a store.
             runtime.response_length_feedback_observer = getattr(
                 self, "_response_length_feedback", None
             )
+            runtime.observatory_feedback_observer = runtime.response_length_feedback_observer
         except Exception:
             # A missing observability projection must never affect cognition or
             # plugin startup.  Routes will report unavailable state instead.
@@ -1639,6 +1643,7 @@ class IrisMemoryPlugin(Star):
             explicit_detail_request,
             explicit_no_tool_request,
         )
+        runtime = get_cognitive_runtime()
 
         views: dict[str, dict[str, object]] = {
             "committed_affect": {},
@@ -1695,6 +1700,17 @@ class IrisMemoryPlugin(Star):
                 and str(affect.get("user_id", "")) == str(event.get_sender_id())
             ):
                 views["committed_affect"] = affect
+        counts = getattr(runtime, "observatory_projection_counts", None)
+        if isinstance(counts, dict):
+            counts["events"] = int(counts.get("events", 0)) + 1
+            for name, key in (
+                ("relationship", "committed_relationship"),
+                ("behavioral_prior", "behavioral_prior"),
+                ("affect", "committed_affect"),
+            ):
+                if views[key]:
+                    counts[name] = int(counts.get(name, 0)) + 1
+            runtime.observatory_last_projection_at = time.time()
         return views
 
     async def _handle_reply_decision(self, event: AstrMessageEvent) -> bool:

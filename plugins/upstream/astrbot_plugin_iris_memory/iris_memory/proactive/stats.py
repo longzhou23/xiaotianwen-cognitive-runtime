@@ -41,6 +41,7 @@ class GroupStats:
     last_reply_time: float = 0.0
     current_state: str = "idle"
     willingness: str = "medium"
+    no_uninvited_group_interjection: bool = False
     msg_count: int = 0
     effective_n: int = 0
     effective_t: int = 0
@@ -137,6 +138,7 @@ class StatsCollector:
         group_id: str,
         state: str,
         willingness: str,
+        no_uninvited_group_interjection: bool,
         msg_count: int,
         effective_n: int,
         effective_t: int,
@@ -149,6 +151,7 @@ class StatsCollector:
         gs = self._ensure_group(group_id)
         gs.current_state = state
         gs.willingness = willingness
+        gs.no_uninvited_group_interjection = no_uninvited_group_interjection
         gs.msg_count = msg_count
         gs.effective_n = effective_n
         gs.effective_t = effective_t
@@ -172,6 +175,7 @@ class StatsCollector:
             "last_reply_time": gs.last_reply_time,
             "current_state": gs.current_state,
             "willingness": gs.willingness,
+            "no_uninvited_group_interjection": gs.no_uninvited_group_interjection,
             "msg_count": gs.msg_count,
             "effective_n": gs.effective_n,
             "effective_t": gs.effective_t,

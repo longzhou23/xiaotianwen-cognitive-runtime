@@ -296,6 +296,14 @@ def test_summary_projects_authoritative_review_store_and_effective_runtime_state
             "promotion_rules": ("EXPLICIT_CORRECTION_OF_EXACT_HOST_OUTPUT_V1",),
             "semantic_evaluator": "EXPLICIT_CORRECTION_V1",
             "p2b_enabled": False,
+            "host_cas_available": True,
+            "feedback_available": True,
+            "feedback_observations": 3,
+            "identity_available": True,
+            "identity_entities": 2,
+            "identity_claims": 4,
+            "projection_counts": {"events": 9, "relationship": 2, "behavioral_prior": 5, "affect": 1},
+            "last_projection_at": 1788796800.0,
         },
     )
 
@@ -312,6 +320,15 @@ def test_summary_projects_authoritative_review_store_and_effective_runtime_state
     assert summary["promotion"]["enabled"] is True
     assert summary["promotion"]["rules"] == ["EXPLICIT_CORRECTION_OF_EXACT_HOST_OUTPUT_V1"]
     assert summary["semantic_evaluator"] == "EXPLICIT_CORRECTION_V1"
+    adaptive = summary["adaptive_runtime"]
+    assert adaptive["host_cas"] == {"available": True, "scope": "response_style_preference:v1"}
+    assert adaptive["feedback_replay"]["observations"] == 3
+    assert adaptive["identity"]["entities"] == 2
+    assert adaptive["situation"]["events"] == 9
+    assert adaptive["relationship"]["observed"] == 2
+    assert adaptive["behavioral_prior"]["permission_effect"] == "none"
+    assert adaptive["affect"] == {"available": True, "observed": 1, "owner": "astrbot_plugin_affection", "ttl_seconds": 60}
+    assert adaptive["history_write"]["status"] == "LOCKED"
 
 
 def test_summary_reports_unavailable_review_store_without_false_zero_counts():
@@ -444,10 +461,14 @@ def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy()
     source = view.read_text(encoding="utf-8")
     assert "phaseTitle" in source
     assert "Production Cognitive Runtime" in source
-    assert "Behavioral Learning · DISABLED" in source
+    assert "受控长期适应 · ENABLED" in source
+    assert "通用 P2b · DISABLED" in source
     assert "P1 Experience &amp; Review Foundation" not in source
     assert "P1 FOUNDATION · ACCEPTED" not in source
-    assert "P2b 尚未开始" in source
+    assert "长期适应运行态" in source
+    assert "Host 原子写" in source
+    assert "BehavioralPrior" in source
+    assert "L28 历史数据写入仍锁定" in source
     assert "Unavailable" in source
     assert "Finding 已记录，但当前不可 promotion" in source
     assert "引用：" in source

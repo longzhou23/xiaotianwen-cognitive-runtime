@@ -13,6 +13,13 @@ PLUGIN_NAME = "astrbot_plugin_iris_memory"
 def get_observatory_service() -> P1ObservatoryService:
     runtime = get_cognitive_runtime()
     observer = runtime.episode_observer
+    feedback = getattr(runtime, "observatory_feedback_observer", None)
+    registry = getattr(runtime, "registry", None)
+    try:
+        entity_count = len(registry.entities()) if registry is not None else None
+        claim_count = len(registry.all_claims()) if registry is not None else None
+    except Exception:
+        entity_count = claim_count = None
     return P1ObservatoryService(
         getattr(observer, "store", None),
         review_store=getattr(runtime, "observatory_review_store", None),
@@ -26,6 +33,14 @@ def get_observatory_service() -> P1ObservatoryService:
             "promotion_rules": getattr(runtime, "observatory_promotion_rules", ()),
             "semantic_evaluator": getattr(runtime, "observatory_semantic_evaluator", None),
             "p2b_enabled": getattr(runtime, "observatory_p2b_enabled", False),
+            "host_cas_available": getattr(runtime, "observatory_host_cas_available", False),
+            "feedback_available": bool(getattr(feedback, "available", False)),
+            "feedback_observations": len(getattr(feedback, "observations", ())),
+            "identity_available": entity_count is not None and claim_count is not None,
+            "identity_entities": entity_count,
+            "identity_claims": claim_count,
+            "projection_counts": dict(getattr(runtime, "observatory_projection_counts", {})),
+            "last_projection_at": getattr(runtime, "observatory_last_projection_at", None),
         },
     )
 
