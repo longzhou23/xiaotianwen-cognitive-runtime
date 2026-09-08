@@ -757,3 +757,14 @@ BLOCKED 的具体规则缺口：
 ### R04 管理入口补齐
 
 复用 ADMIN iris_mem preference 新增 feedback_status / feedback_revoke / feedback_conflict，按绑定精确链、scope 和 UTC 时间的稳定观察 ID 操作。修复失效记录重放绑定及清锁失败误报；保留人工巩固和批准。仅语法/静态检查，未跑测试、未部署；Host 自动失效事件和 CAS 仍未实现，冻结项不变。
+
+
+## 2026-09-08 R04 生产接线交付
+
+维护者“完成剩余部分”后，沿用此前回复偏好部署授权，将 R04 的 observer、capture/archive 回调、管理员反馈状态/撤销/冲突命令作为五文件定向补丁部署。未把整个工作树或其他插件覆盖到生产。main.py 仅替换 capture/archive 初始化方法并接入 observer 引用，其他运行逻辑保留生产版本。
+
+生产启动时间 2026-09-08T01:45:04Z。启动日志确认 P2r0 factual capture enabled、historical archive wiring enabled、Iris 异步初始化完成；WebUI HTTP 200。补丁逐文件 before/after SHA-256 见 [R04 生产清单](production-r04-release-20260908.json)。服务器已创建 iris-r04-20260908T014503Z 定向代码备份、配置快照及 rollback.sh，未执行回退演练。
+
+R04 现在从“源码接线、未部署”推进到“生产代码已加载”。新反馈可沿 capture/archive 进入无正文日志与人工管理路径；没有将旧 archive 推断成历史反馈。运行过程中新增合法观察可能正常写入自身日志，但没有执行历史维护、修改配置或自动批准。按用户要求未运行测试套件、真实消息样例或主动故障演练，因此管理员命令实测、跨重启精确链重放、并发恢复和 Provider 效果仍未验证。
+
+本节覆盖前文“R04 尚未部署”的历史状态。R02/CAS、真实历史单条授权、Host 自动撤销事件及 R07/R08/R10/R11 的冻结边界不因部署改变。

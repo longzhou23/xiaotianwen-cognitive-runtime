@@ -730,3 +730,8 @@ G4：Observatory。
 ### R04 管理入口补齐
 
 复用 ADMIN iris_mem preference 新增 feedback_status / feedback_revoke / feedback_conflict，按绑定精确链、scope 和 UTC 时间的稳定观察 ID 操作。修复失效记录重放绑定及清锁失败误报；保留人工巩固和批准。仅语法/静态检查，未跑测试、未部署；Host 自动失效事件和 CAS 仍未实现，冻结项不变。
+
+
+### R04 生产接线
+
+2026-09-08T01:45:04Z 定向五文件补丁已部署；capture/archive/Iris 异步初始化完成，HTTP 200。详情见 [交付页](docs/memory-evolution/README.md) 最新节。未修改配置或历史维护，未跑测试或恢复演练。CAS 和冻结事项继续保留。

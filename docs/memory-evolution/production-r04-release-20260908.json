@@ -1,0 +1,35 @@
+{
+  "source_commit": "b1b0a068398e4c055eaf8bb7c532bf567bdcbe0a",
+  "deployed_at_utc": "2026-09-08T01:45:04Z",
+  "scope": "R04 observer capture archive and explicit administrator lifecycle",
+  "runtime_only": true,
+  "configuration_changed": false,
+  "historical_maintenance_executed": false,
+  "files": [
+    {
+      "path": "main.py",
+      "before": "d81d0c5f0f5515caca7cdc7afcdee7515e90ef0d636a2c2e36b7bb9b2b179f23",
+      "after": "edbeedc426bdf48960e0e6ba02acc7eb7cb15a5ea89b17c95b4fca8fb27f6d97"
+    },
+    {
+      "path": "iris_memory/cognitive/response_preference_feedback.py",
+      "before": "915a5f2c422cc46bbcc518832a213b432816f8744dd5bfb7ecc88ff7c478fe90",
+      "after": "f5a88b9209dbbce5947662f78e99936f5aa63717896a79dd69b9527053f9a78e"
+    },
+    {
+      "path": "iris_memory/cognitive/reply_link_capture.py",
+      "before": "f661c8820c9bf4a9ae7dec9aaf727dca1d1a4111f139a301d52d1138b8d9f84a",
+      "after": "5fb80149e2725fd544d3b18cd2d527cff8e6ec3859027f7d613c7d12f5f847e2"
+    },
+    {
+      "path": "iris_memory/cognitive/reply_link_archive.py",
+      "before": "bfb6fb6c02b527a87b4e925752d792147560af010590735d30021b841b4179c1",
+      "after": "b5dac19bd0778a4707fe6ab9127635c944ccc11b3d3e06f1193d25423c00dc0f"
+    },
+    {
+      "path": "iris_memory/commands/response_preference_handler.py",
+      "before": "f82ee1f0b3fdc5a8a682764ae220e286f4e21e7083a0e70fff73a8758bf90ab4",
+      "after": "a0b8758844b96b079e017858777de06686bdc52c3313c8a974894f3746cc2742"
+    }
+  ]
+}
