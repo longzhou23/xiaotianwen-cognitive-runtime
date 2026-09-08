@@ -707,9 +707,9 @@ G4：Observatory。
 | 卡 | 状态 | 本轮结果 |
 |---|---|---|
 | R01 | 本地完成 | L28 单条撤销/恢复改为 CAS 必需、备份 hash 绑定、提交后不误报失败。 |
-| R02 | 部分完成 | 实际 AstrBot KV 缺少已验证 CAS，维护写安全拒绝，待后端能力/原子 API。 |
+| R02 | 完成并上线 | AstrBot 核心提供限定 CAS，覆盖 SharedPreferences FIFO/缓存、SQLite BEGIN IMMEDIATE 事务和提交后读回；仅允许 `response_style_preference:v1`。生产 CAS 镜像已加载，未执行真实偏好写。 |
 | R03 | 本地完成 | Persona 测试改为显式批准，保留 L24 禁止自动发布。 |
-| R04 | 部分完成 | exact 链和失效聚合已有；重启 replay 缺少无正文的 durable observation 契约。 |
+| R04 | 代码与测试完成 | 无正文 durable observation、重启重放、损坏/占锁 fail-closed、管理员显式撤销/冲突入口已接线；68 项组合测试通过。真实用户反馈触发的端到端失效仍需自然运行观察。 |
 | R05 | 本地完成 | capture/archive/Review/P2r0 组合回归通过，未做真实平台发送。 |
 | R06 | 本地完成 | `profile.enable` 生命周期和 Hook fail-closed 复验通过。 |
 | R07 | 本地完成 | Identity 单一 owner、校验和持久化、UID-first、人工 alias 确认/精确撤销和冲突 fail-closed 已接通；待生产重启验证。 |

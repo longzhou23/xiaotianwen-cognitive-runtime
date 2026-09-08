@@ -524,6 +524,8 @@ BLOCKED 的具体规则缺口：请先冻结 D02 的独立证据定义、最少�
 - 做什么：针对一个可复现缺陷生成变更清单，含真实记录 ID、修改前后字段、依据和跳过原因；输出不得额外复制不必要的私人正文。
 - 验收：零写入；缺精确来源的记录跳过；不以 LLM 补造事实；重复运行清单稳定；不能借历史修复批量把旧聊天重新解释为长期偏好。
 
+当前状态（2026-09-08）：真实只读 inventory 已完成，授权 namespace 中存在 1 条 APPROVED。真实 scope、candidate ID、字段内容和证据不进入公共仓库。该 inventory 只证明存在记录，不构成 L28 写入清单或授权。
+
 ### L28 — 小批回写与可恢复执行
 
 - [x] 已完成本地条件撤销和恢复实现及虚构数据验收：仅允许一个预检仍有效的 `APPROVED → REVOKED`；哈希、scope、source 或状态变化即零写入；写入前创建不可重用备份目录，写后读回校验，并可在 after hash 一致时从 before 快照恢复。
@@ -531,12 +533,16 @@ BLOCKED 的具体规则缺口：请先冻结 D02 的独立证据定义、最少�
 - 做什么：先备份并实际验证可恢复，再用最小批准批次验证迁移；记录检查点和每条前置版本，数据变化后跳过冲突，不能覆盖新写入。
 - 验收：中断续跑无重复写入；失败可恢复；计数与逐条结果一致；小批验收后才扩到批准范围。大规模历史修复是单独数据操作，不随源码部署自动执行。
 
+当前状态（2026-09-08）：R02 Host CAS 已测试并部署，但数据授权门槛不变。缺少目标 candidate ID、`APPROVED→REVOKED` 字段前后值、精确 source evidence、当前前置 payload hash、插件扫描目录外备份位置、恢复读回方案和该单条记录的明确写入授权，因此维护入口继续零写入。CAS 可用不能自动启动旧迁移器或历史回写。
+
 ### L29 — 本地运行、灰度与关闭验证
 
 - [x] 本地完整验收完成；灰度和发布仍需单独部署授权。分成三个独立子卡：本地完整验收；经部署授权后单一测试范围灰度；经扩大范围授权后发布。
 - 做什么：只启用已验收且规则已冻结的参数，记录配置版本、可解释原因、拒绝/冲突/过期计数和必要性能指标。
 - 验收：真实入站→持久化→下次请求/决策消费者闭环可观察；总开关关闭立即停止新的适应影响；旧候选不因上线自动批准；错误时可以恢复配置和已验证代码版本。
 - 交付：明确哪些已写代码、通过本地测试、真实平台验证、生产开启。未运行的检查写“未验证”。
+
+当前状态（2026-09-08）：旧五文件生产补丁结果只作为历史证据。随后已独立完成全源码 Iris v3.0.4 与 affection v1.2 部署，并以派生镜像 `xiaotianwen/astrbot:h0-v4.27.5-cas2` 部署 AstrBot Host CAS。容器接口存在、Iris 异步初始化和 HTTP 200 已验证；真实消息、Provider 行为和真实 L28 写入没有据此标为通过。
 
 ### 2026-09-08 第七批 / D10 执行记录
 
@@ -608,13 +614,13 @@ BLOCKED 的具体规则缺口：
 
 ### R02 — 真实维护写入边界
 
-状态：部分完成。
+状态：AstrBot 核心能力已完成测试并部署；L28 数据写入仍未授权。
 
-实际改动：无需新增不安全适配器。当前 `Star` KV 协议只有 get/put/delete；用进程锁冒充跨进程事务会有覆盖风险，因此缺 CAS 时零写入退出。
+实际改动：AstrBot `BaseDatabase` 增加可选条件写合同，SQLite 用 `BEGIN IMMEDIATE` 在同一事务内比较并替换；`SharedPreferences` 把 CAS 放入现有 FIFO writer，清除该限定 key 的投机缓存，并在读取前 flush；`PluginKVStoreMixin.compare_and_swap_kv_data()` 只接受 `response_style_preference:v1` 和 dict payload。缺记录或前置值不匹配返回 False，后端不支持时抛出 `NotImplementedError`，异常不回退普通 put。Iris 只调用 Host API，不绕过 Host 直写 SQLite。
 
-验证：R01 虚构 CAS 冲突和缺能力 fail-closed 路径通过。
+验证：AstrBot `tests/unit/test_shared_preferences.py` 为 `15 passed, 13 warnings`；包含缺记录、冲突、成功提交、提交后读回、两个独立 engine 竞争单一胜者、普通写 FIFO、故障恢复、其他 key 和 NaN 拒绝。Ruff format/check 通过。生产使用 `xiaotianwen/astrbot:h0-v4.27.5-cas2`，容器内接口存在，Iris v3.0.4 异步初始化完成，HTTP 200。
 
-未验证：需确认 AstrBot 后端是否有事务/CAS，或由后端提供仅限单条维护的原子 API。
+未执行：没有对真实 `response_style_preference:v1` 运行 CAS。L27 的真实目标详情继续只保存在受控运维边界；没有字段前后值、证据、前置 hash、备份计划和精确单条授权时，L28 仍零写入。
 
 下一张卡：R03。
 
@@ -634,15 +640,15 @@ BLOCKED 的具体规则缺口：
 
 ### R04 — 反馈证据重放与失效
 
-状态：部分完成，保持契约冻结。
+状态：源码、管理接线和故障测试完成；真实消息失效动作待自然运行观察。
 
 具体缺口：观察器已用 exact inbound/reply-link/Host 链去重，聚合也能处理 revoked/conflicted 输入；但原始明确反馈命中、可信 scope 和权威时间只在进程内，P2r0 archive 不保存这些派生观察字段，重启后不能猜回。
 
-实际改动：无需改动。现有 capture→archive 真实接线保留，不能伪造持久化重放。
+实际改动：复用 P2r0 archive owner，使用不含正文的 `response_length_feedback_observation:v1` append-only journal 保存 exact chain、private scope、权威 UTC 时间和 `ACTIVE|REVOKED|CONFLICTED`。重启时只与权威 archive 精确重连；管理员命令按稳定 observation ID 显式撤销或标冲突。损坏、未知字段、残留锁或写入/解锁失败会关闭巩固，不以内存成功替代。
 
-验证：`tests/cognitive/test_p2r0_archive_wiring.py tests/cognitive/test_reply_link_capture.py tests/cognitive/test_response_preference_feedback.py tests/cognitive/test_p2r1_explicit_correction_rule.py`：`85 passed, 1 skipped, 1 warning`。
+验证：本轮实际运行前三个核心组合文件，`68 passed, 1 warning`，覆盖重启、损坏 journal、占锁、精确链重放、archive 接线、撤销/冲突聚合。生产重启日志确认 P2r0 capture、historical archive 和 Iris 异步初始化完成。
 
-未验证：需要批准一个不存正文、只存 exact chain ID/private scope/权威 UTC 时间/`ACTIVE|REVOKED|CONFLICTED` 的 append-only feedback observation 契约，才可实现跨重启 replay 与失效。
+未验证：尚未为制造测试而发送真实用户消息或执行真实 observation 撤销；因此不能声称所有平台实际 scope 或真实失效来源端到端已证明。
 
 下一张卡：R05。
 

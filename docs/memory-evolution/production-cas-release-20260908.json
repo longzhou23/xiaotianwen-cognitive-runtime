@@ -1,0 +1,28 @@
+{
+  "schema": "xiaotianwen.astrbot-cas-release.v1",
+  "deployed_at_utc": "2026-09-08T05:01:38Z",
+  "host_alias": "azure-xtw-01",
+  "container": "astrbot",
+  "image": "xiaotianwen/astrbot:h0-v4.27.5-cas2",
+  "image_id": "sha256:9c851b4cc5ca91ffb65051a7e74b6b7b4117300b6b650f2e03f51cacf41f1f7b",
+  "base_runtime_snapshot": "xiaotianwen/astrbot:h0-v4.27.5-runtime-20260908",
+  "rollback_container": "astrbot-precas-20260908",
+  "backup_directory": "/home/developer/xiaotianwen/backups/astrbot-cas-20260908T045213Z",
+  "scope": {
+    "namespace": "plugin",
+    "key": "response_style_preference:v1",
+    "other_keys_rejected": true,
+    "plugin_sqlite_bypass": false
+  },
+  "verification": {
+    "astrbot_shared_preferences_tests": "15 passed",
+    "ruff_format": "passed",
+    "ruff_check": "passed",
+    "r04_combination_tests": "68 passed",
+    "http_status": 200,
+    "iris_version": "3.0.4",
+    "iris_async_initialization": "completed",
+    "cas_method_present_in_container": true,
+    "production_preference_write_performed": false
+  }
+}
