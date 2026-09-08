@@ -84,6 +84,16 @@ R04 现在从“源码接线、未部署”推进到“生产代码已加载”�
 
 本节覆盖前文“R04 尚未部署”的历史状态。R02/CAS、真实历史单条授权、Host 自动撤销事件及 R07/R08/R10/R11 的冻结边界不因部署改变。
 
+## 2026-09-08 R07/R08/R10/R11 解冻与生产接线
+
+维护者明确要求解冻并完成四卡。公共实现以 `0a1fedc` 提交，身份文件权限收紧以 `c56204b` 补充；生产完整 Iris 插件同步到同一源码基线，affection owner 的脱敏快照实现同步到私有实例仓库 `1f7e555`。
+
+生产路径为 `/home/developer/xiaotianwen/runtime/astrobot/data/plugins/`。首次仅覆盖新增文件时发现生产 Iris 仍是旧的五文件热补丁基线，出现 `ShadowStrategyProposal` 导入失败；随后在插件扫描目录外完整备份并从公共仓库同一提交覆盖整套 Iris 源码。最终 AstrBot HTTP 200，affection v1.2 与 Iris v3.0.4 均加载，Iris 异步初始化完成；Identity 信封存在 schema 与 checksum，权限为 `0600`。
+
+备份：`/home/developer/xiaotianwen/backups/r07-r11-20260908T042805Z/` 保存最初定向文件，`/home/developer/xiaotianwen/backups/iris-full-before-20260908T042941Z/` 保存完整 Iris 目录，均带 SHA256SUMS。恢复时停容器、校验归档、解包回原插件目录、启动容器并复核插件加载与 HTTP 200。
+
+本轮遵循维护者此前决定，没有运行 pytest 或真实消息验收。已验证源码编译、插件加载、身份持久化文件创建、权限和服务健康；尚未证明真实 Provider 对 BehavioralPrior 的表达遵循、每个平台的真实 scope、管理 API 实际操作、alias 冲突/撤销重启和 Affect 快照在真实 Trigger YES 请求中的可见性。
+
 
 ## R02 后端 CAS 开发补充
 
