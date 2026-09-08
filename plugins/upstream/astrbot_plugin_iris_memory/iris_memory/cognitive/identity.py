@@ -195,6 +195,7 @@ class EntityRegistry(IdentityStore):
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
+            os.chmod(path, 0o600)
         except Exception:
             temporary.unlink(missing_ok=True)
             self._available = False
