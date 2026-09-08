@@ -94,6 +94,9 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             "pending": "查看待人工核实的候选",
             "status": "查看全部候选及有效/过期/撤销状态",
             "consolidate_length": "把已达 L09 门槛的 review-only 聚合转为待核实候选",
+            "feedback_status": "查看精确反馈观察 ID 和生命周期，不显示消息正文",
+            "feedback_revoke <observation_id>": "撤销一条精确反馈观察，不直接撤销已批准偏好",
+            "feedback_conflict <observation_id>": "将一条精确反馈观察标为冲突，停止参与后续巩固",
             "approve <candidate_id>": "批准一个已核实来源（不自动续期）",
             "revoke <candidate_id>": "撤销一个候选或已批准记录",
         }
@@ -124,6 +127,8 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             return await self._list(storage, None)
         if sub_command == "consolidate_length":
             return await self._consolidate_length(storage)
+        if sub_command in {"feedback_status", "feedback_revoke", "feedback_conflict"}:
+            return self._feedback_operation(sub_command, args)
         if sub_command == "approve":
             candidate_id = _candidate_arg(args)
             if not candidate_id:
@@ -152,6 +157,51 @@ class ResponsePreferenceCommandHandler(CommandHandler):
         if sub_command == "help":
             return CommandResult(True, self.get_help_text())
         return CommandResult(False, f"未知的子指令: {sub_command}\n{self.get_help_text()}")
+
+    def _feedback_operation(self, operation: str, args: ParsedArgs) -> CommandResult:
+        from iris_memory.cognitive.response_preference_feedback import (
+            FEEDBACK_EVIDENCE_CONFLICTED,
+            FEEDBACK_EVIDENCE_REVOKED,
+        )
+
+        try:
+            from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
+
+            observer = getattr(get_cognitive_runtime(), "response_length_feedback_observer", None)
+            if observer is None:
+                return CommandResult(False, "反馈观察器未接入")
+            observer.refresh_archives()
+            if not observer.available:
+                return CommandResult(False, "反馈日志或权威 archive 不可用，未执行操作")
+            items = observer.observations
+            if operation == "feedback_status":
+                lines = ["精确反馈观察（无正文；撤销观察不等于撤销已批准偏好）"]
+                for item in items:
+                    lines.append(
+                        f"{observer.observation_id(item)} | {item.evidence_state} | "
+                        f"{item.occurred_at.isoformat()} | "
+                        f"platform={item.scope.platform_id} account={item.scope.account_id} "
+                        f"user={item.scope.user_id} conversation={item.scope.conversation_id}"
+                    )
+                return CommandResult(True, "\n".join(lines) if items else "当前没有已完成精确归档的反馈观察")
+            target_id = _candidate_arg(args)
+            if len(args.raw_args) != 2:
+                return CommandResult(False, f"用法: iris_mem preference {operation} <observation_id>")
+            matches = [item for item in items if observer.observation_id(item) == target_id]
+            if len(matches) != 1:
+                return CommandResult(False, "精确观察 ID 不存在或不唯一，未修改")
+            state = (FEEDBACK_EVIDENCE_REVOKED if operation == "feedback_revoke"
+                     else FEEDBACK_EVIDENCE_CONFLICTED)
+            if not observer.invalidate_observation(matches[0], state):
+                return CommandResult(False, "观察状态未确认写入；请检查日志后重读，未回报成功")
+            states = {item.evidence_state for item in observer.observations
+                      if observer.observation_id(item) == target_id}
+            if len(states) != 1 or not observer.available:
+                return CommandResult(False, "观察状态读回未确认，未回报成功")
+            return CommandResult(True, f"观察状态已读回：{next(iter(states))}；已有偏好仍需使用 revoke 单独撤销")
+        except Exception:  # noqa: BLE001 - no raw observation payload in command errors
+            logger.warning("反馈观察管理失败，未回报成功")
+            return CommandResult(False, "反馈观察管理失败，未回报成功")
 
     async def _consolidate_length(self, storage: ProfileStorage) -> CommandResult:
         try:

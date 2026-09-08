@@ -725,3 +725,8 @@ G4：Observatory。
 ## 2026-09-08 备忘录整理与 GitHub 收口
 
 最新覆盖矩阵与剩余工作见 [记忆演化交付页](docs/memory-evolution/README.md)。R04 已补齐无正文 append-only 观察日志源码、重启重建和显式失效 API；测试代码新增但按用户要求未执行。实际 KV 无 CAS，L28 历史写继续关闭。只读 inventory 有一条 APPROVED，未写入。生产仅五文件回复偏好补丁已加载且 WebUI HTTP 200，本轮完整源码未部署。R07/R08/R10/R11 继续冻结。旧 R12 待授权记录由后续明确上线和 GitHub 同步授权覆盖，但不包含历史写入。
+
+
+### R04 管理入口补齐
+
+复用 ADMIN iris_mem preference 新增 feedback_status / feedback_revoke / feedback_conflict，按绑定精确链、scope 和 UTC 时间的稳定观察 ID 操作。修复失效记录重放绑定及清锁失败误报；保留人工巩固和批准。仅语法/静态检查，未跑测试、未部署；Host 自动失效事件和 CAS 仍未实现，冻结项不变。

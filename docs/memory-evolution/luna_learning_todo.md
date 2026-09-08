@@ -752,3 +752,8 @@ BLOCKED 的具体规则缺口：
 - 验证：按维护者要求不运行 pytest 或真实消息演练；新增重启、损坏日志和占锁场景测试代码供后续运行，本轮只做 Python 语法、静态检查与 Git diff 检查。源码补齐不标记为测试通过。
 
 当前导航和完整覆盖矩阵以本目录 README.md 为准。旧逐日记录作为历史保留，不再将旧 BLOCKED 或旧测试计数当作当前状态。
+
+
+### R04 管理入口补齐
+
+复用 ADMIN iris_mem preference 新增 feedback_status / feedback_revoke / feedback_conflict，按绑定精确链、scope 和 UTC 时间的稳定观察 ID 操作。修复失效记录重放绑定及清锁失败误报；保留人工巩固和批准。仅语法/静态检查，未跑测试、未部署；Host 自动失效事件和 CAS 仍未实现，冻结项不变。

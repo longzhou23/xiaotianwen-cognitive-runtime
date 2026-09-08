@@ -353,6 +353,9 @@ class ResponseLengthFeedbackReviewObserverV1:
                 if (scope, occurred_at) not in entries:
                     entries.append((scope, occurred_at))
             elif row["state"] != FEEDBACK_EVIDENCE_ACTIVE:
+                if (sources.get(chain[1]) != chain[0]
+                        or (scope, occurred_at) not in pending.get(chain[1], ())):
+                    raise ValueError("invalidation does not match a recorded source, scope and time")
                 key = tuple(chain)
                 if invalidations.get(key) != FEEDBACK_EVIDENCE_CONFLICTED:
                     invalidations[key] = row["state"]
@@ -396,7 +399,6 @@ class ResponseLengthFeedbackReviewObserverV1:
                     finally:
                         os.close(directory)
             self._replay_journal(owned_lock=True)
-            return True
         except (OSError, ValueError, TypeError, KeyError):
             self._journal_failed = True
             self._observations.clear()
@@ -408,6 +410,23 @@ class ResponseLengthFeedbackReviewObserverV1:
                     lock.rmdir()
                 except OSError:
                     self._journal_failed = True
+                    self._observations.clear()
+                    logger.error("Feedback journal lock release failed; consolidation disabled")
+        return not self._journal_failed
+
+    @property
+    def available(self) -> bool:
+        """A persisted observer also needs the authoritative archive binding."""
+        return not self._journal_failed and self._archive_store is not None
+
+    @staticmethod
+    def observation_id(item: ResponseLengthFeedbackAggregationInputV1) -> str:
+        """Stable exact target, including scope/time; state transitions retain it."""
+        return "rfo_" + ResponseLengthFeedbackReviewObserverV1._journal_hash({
+            "chain": list(item.feedback_identity),
+            "scope": item.scope.to_dict(),
+            "occurred_at": item.occurred_at.isoformat(),
+        })
 
     def invalidate_observation(self, item: ResponseLengthFeedbackAggregationInputV1,
                                state: str) -> bool:

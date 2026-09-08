@@ -32,7 +32,7 @@
 
 日志位于插件数据目录 `cognitive/response_length_feedback_observation.v1.jsonl`，不在源码目录。只保存 schema、exact source/inbound ID、scope、UTC 时间和生命周期；失效记录另外携带完整四元组。不会保存消息正文或生成另一套 ReviewEvidence。每次巩固前重新加载日志并用 archive 重建精确链。缺 archive 的 pending 记录不能独立影响偏好。
 
-`invalidate_observation(item, state)` 是现有 owner 的显式 API，只接受已经存在的精确观察，状态仅 REVOKED/CONFLICTED。没有新增任意聊天指令或模型写入者；真实权威撤销事件的接入仍需在 Host 提供该事件后对接，不能用“疑似冲突”文本调用它。已批准偏好的撤销仍使用既有管理员命令，不由观察日志直接改写。
+`invalidate_observation(item, state)` 是现有 owner 的显式 API，只接受已经存在的精确观察，状态仅 REVOKED/CONFLICTED。管理员现可通过既有 `iris_mem preference` 路由显式查看、撤销或标记冲突；没有模型写入者。Host 平台自动撤销事件的接入仍需由真实事件来源提供，不能用“疑似冲突”文本调用它。已批准偏好的撤销仍使用既有管理员命令，不由观察日志直接改写。
 
 损坏或不完整日志不会自动截断/删除；占锁、读写错误会停止巩固。维护时先停止所有共享该日志的实例，备份日志及残留 `.lock` 目录，再判断已完整且校验通过的记录边界；没有恢复核验前不要恢复巩固。该恢复流程本轮未演练。
 
@@ -58,3 +58,17 @@ Iris 异步初始化完成，容器运行且 WebUI HTTP 200。FAISS 的 AVX2 变
 本轮没有运行 pytest、真实消息发送、Provider 样例或恢复演练。仅执行 Python 语法检查、适用静态检查、文档链接检查和 Git diff 检查。历史卡中的测试数字仅属于其记录日期，不能算作本轮新增代码的验证。
 
 本轮构建结果：71 个相关 Python 文件语法检查通过；新增 R04 文件、main.py 和反馈测试文件 Ruff F 检查通过；`npm run build:check` 的 Vue 类型检查及 Vite 生产构建通过，已同步打包页面。构建有大于 600 kB 的现有图表 vendor chunk 提示，不影响构建完成。新增和历史测试均未在本轮运行。
+
+
+## R04 管理闭环补充
+
+管理员沿用 `iris_mem` 的 ADMIN 权限入口：
+
+- `iris_mem preference feedback_status`：列出已完成精确 archive 的观察 ID、scope、UTC 时间和状态，不显示正文。
+- `iris_mem preference feedback_revoke <observation_id>`：把指定观察标为 REVOKED。
+- `iris_mem preference feedback_conflict <observation_id>`：把指定观察标为 CONFLICTED。
+- `iris_mem preference consolidate_length`：沿用 D02 门槛，失效观察不再参与新巩固；只生成 PENDING。
+
+观察 ID 同时绑定完整四元组、scope 与权威时间，状态变化不会改变 ID。操作前刷新日志和 archive，写入后读回实际状态；CONFLICTED 不会被后来的 REVOKED 降级。已批准偏好是独立的权威记录，仍须通过原 `revoke <candidate_id>` 显式撤销。命令不会自动批准、改 Persona 或改生产配置。
+
+本轮同时修复日志重放未校验失效记录与原始 scope/时间一致的问题，以及释放日志锁失败仍可能回报写入成功的问题。缺 archive、日志故障或读回异常均不回报成功。新管理命令尚未部署，按既有要求未跑测试套件。该补充完成可操作的管理员闭环源码，不代表所有冻结研究目标完成。
