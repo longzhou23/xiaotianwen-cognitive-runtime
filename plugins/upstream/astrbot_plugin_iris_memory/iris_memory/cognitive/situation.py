@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from threading import RLock
@@ -109,20 +110,27 @@ class SituationBuilder:
             for scope in oldest[: len(self._scopes) - self._MAX_SCOPES]:
                 self._scopes.pop(scope, None)
 
-    def build_full(self, experience: CanonicalExperience, lite: SituationLite) -> SituationFull:
+    def build_full(
+        self,
+        experience: CanonicalExperience,
+        lite: SituationLite,
+        *,
+        runtime_views: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> SituationFull:
         """Construct the frozen read-only view only after Trigger YES.
 
-        Affect, relationship, BehaviouralPrior and Persona have no P0 writer;
-        their empty mappings make that absence explicit instead of inventing data.
+        Each projection is supplied by its existing owner at the event boundary.
+        Situation freezes the values and never persists, infers, or writes them.
         """
+        views = runtime_views or {}
         return SituationFull(
             experience=experience,
             lite=lite,
             runtime_memory_view=(),
-            committed_affect={},
-            committed_relationship={},
-            behavioral_prior={},
-            persona_read_only={},
+            committed_affect=views.get("committed_affect", {}),
+            committed_relationship=views.get("committed_relationship", {}),
+            behavioral_prior=views.get("behavioral_prior", {}),
+            persona_read_only=views.get("persona_read_only", {}),
         )
 
     def build(self, event: ResolvedEvent, previous: Situation | None = None) -> Situation:

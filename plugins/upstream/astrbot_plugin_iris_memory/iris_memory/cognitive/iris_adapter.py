@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
-from typing import TYPE_CHECKING, Any, Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from .contracts import (
     CanonicalExperience,
@@ -318,18 +319,29 @@ class CognitiveRuntime:
         self.observatory_p2b_enabled = False
         self.observatory_interaction_trace: Any | None = None
 
+    def bind_identity_store(self, storage_path: str | Path) -> None:
+        """Bind the single durable Identity owner before handling events."""
+        registry = EntityRegistry(storage_path=storage_path)
+        self.registry = registry
+        self.identity = IdentityResolver(registry)
+        self.perspective = PerspectiveResolver(registry.config)
+        self.pre_adapter = IrisPreAdapter(self.identity, self.perspective)
+        self.post_adapter = IrisPostAdapter(self.perspective)
+        self.behavior = CognitiveBehaviorRuntime(self_entity=self.identity.self_entity)
+
     def run_behavior(
         self,
         experience: CanonicalExperience,
         legacy_signals: LegacyProactiveSignals | None = None,
         *,
         runtime_mode: RuntimeMode | None = None,
+        runtime_views: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> BehaviorLoopResult:
         # Snapshot at method entry: no later code may read live global mode.
         trace_mode = runtime_mode if runtime_mode is not None else self.runtime_mode
         self._experiences[experience.event.event_id] = experience
         self._trim_experiences()
-        result = self.behavior.run(experience, legacy_signals)
+        result = self.behavior.run(experience, legacy_signals, runtime_views=runtime_views)
         lite = result.trace.situation_lite
         resolved = []
         if experience.event.actor:

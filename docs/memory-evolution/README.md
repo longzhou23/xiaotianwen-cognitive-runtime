@@ -16,11 +16,11 @@
 |---|---|---|
 | 0–1、8、33、34、36：认知运行架构 | Iris/Host/Orchestrator 分工、规范对象、capture/archive/Review 组合入口 | 真实平台链不能用本地 fixture 代替；后续按平台做完整 scope 接入记录 |
 | 2、6：唯一 Persona / SELF | AstrBot Persona 单一权威；身份 SELF 解析；Persona 候选后显式批准 | 不自动发布 Persona；生产本轮带入了禁止 auto Job 自动发布的代码 |
-| 3–5、7：Entity、alias、共指与主体视角 | UID 优先、歧义 fail-closed、SELF/OTHER/UNKNOWN 投影 | R07 冻结：长期身份 registry 的 owner/schema/撤销裁决尚未批准；不得以昵称补造 |
-| 9–15：状态、关系、情绪、多时间尺度 | 明确私聊 FAMILIAR 候选、7天人工批准；affection 独占 Affect | R11 继续冻结情绪同步；不新增信任、亲密度或隐式关系推断 |
-| 16、24、25、30、31：BehavioralPrior / 长期学习 | 受控回复偏好记录、明确纠正门槛、人工巩固、scope/期限/撤销 | R04 本轮补齐 durable observation 源码；通用 BehavioralPrior、自动发布时间和奖励学习仍冻结 |
+| 3–5、7：Entity、alias、共指与主体视角 | UID 优先、歧义 fail-closed、SELF/OTHER/UNKNOWN 投影 | R07 已解冻：Identity 单一 owner 持久化；alias 仅人工确认并可按 claim ID 撤销，不以昵称自动补造 |
+| 9–15：状态、关系、情绪、多时间尺度 | 明确私聊 FAMILIAR 候选、7天人工批准；affection 独占 Affect | R11 已解冻为 60 秒脱敏只读快照；不新增信任、亲密度或隐式关系推断 |
+| 16、24、25、30、31：BehavioralPrior / 长期学习 | 受控回复偏好记录、明确纠正门槛、人工巩固、scope/期限/撤销 | R10 已将人工批准偏好投影为最小 prior；自动发布时间、奖励学习和权限扩张仍关闭 |
 | 17、32：Episode/Outcome/Review | 生命周期、完成协调、精确链事实、复盘职责已有实现 | 真实 Host/平台完整链仍未演练；不能以回复数量当奖励，也不补造历史证据 |
-| 18：Situation | 保留只读空投影 | R08 冻结；需先批准可读取状态字段和有效期，不从 legacy 字段推断长期状态 |
+| 18：Situation | Trigger YES 后冻结 owner 提供的版本化只读投影 | R08 已解冻；缺失、过期、scope 不符均为空，不从 legacy 字段推断长期状态 |
 | 19–23：Silence/Trigger/Decision/Execution | 现有 Host 路径；管理员群级插话抑制；工具提示按批准 scope 消费 | 全部平台真实行为未验证；不启用通用“是否/何时回复”学习 |
 | 26–29：Reinterpretation、Canonical/Derived、结构演化 | 原始事实与派生解释分离；已有 L1–L3 检索路径 | 大规模重解释、图拓扑自演化和历史重写未实现；需要独立设计和数据清单，不能作为上线顺带迁移 |
 | 35：关键体验验证 | 既有本地反例/闭环测试代码，新增 R04 故障场景代码 | 本轮按用户要求不跑测试；真实 Provider 遵循和用户满意度未验证 |
@@ -50,7 +50,7 @@ Iris 异步初始化完成，容器运行且 WebUI HTTP 200。FAISS 的 AVX2 变
 - R04：源码接线已补齐，新增重启/损坏/占锁测试未运行；跨重启完整组合链和显式失效来源仍未在真实运行中验证。
 - L27：真实只读 inventory 已完成，范围内有一条 APPROVED；目标细节不进入公共 GitHub。没有字段前后值、证据/前置 hash/备份计划和单条授权时不执行 L28。
 - L29：仅五文件生产补丁已通过启动检查；全源码版本部署及真实消息行为另记，不混用旧结果。
-- R07/R08/R10/R11：继续冻结。解冻必须逐项明确 owner、字段、来源、scope、冲突、撤销和消费者合同。
+- R07/R08/R10/R11：维护者已明确解冻，按 Identity/ProfileStorage/affection 既有 owner 分别接线；没有合并为通用学习框架。
 - 结构自演化与历史重解释：保持独立后续设计，不引入通用学习框架或自动历史迁移。
 
 ## 验证口径

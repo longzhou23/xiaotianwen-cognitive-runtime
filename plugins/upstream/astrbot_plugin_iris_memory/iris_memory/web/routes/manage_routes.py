@@ -20,10 +20,69 @@ from iris_memory.profile.storage import ProfileStorage
 from iris_memory.learning import LearningComponent
 from iris_memory.persona_evolution import PersonaEvolutionComponent
 from iris_memory.tasks.scheduler import TaskScheduler
+from iris_memory.cognitive.contracts import CognitiveContractError
+from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
 
 logger = get_logger("web.manage")
 
 PLUGIN_NAME = "astrbot_plugin_iris_memory"
+
+
+async def list_identity_registry():
+    registry = get_cognitive_runtime().registry
+    if not registry.available:
+        return jsonify({"success": False, "error": "身份库不可用"}), 503
+    return jsonify(
+        {
+            "success": True,
+            "schema": "iris.identity-registry-admin.v1",
+            "entities": [
+                {
+                    "id": entity.id,
+                    "platform_ids": dict(entity.platform_ids),
+                    "aliases": list(entity.aliases),
+                }
+                for entity in registry.entities()
+            ],
+            "claims": [
+                {
+                    "claim_id": registry.claim_id(claim),
+                    "mention": claim.mention,
+                    "candidate_entity": claim.candidate_entity,
+                    "evidence": list(claim.evidence),
+                    "source": claim.source,
+                    "status": claim.status.value,
+                    "created_at": claim.created_at.isoformat(),
+                }
+                for claim in registry.all_claims()
+            ],
+        }
+    )
+
+
+async def confirm_identity_alias():
+    data = await request.get_json(silent=True) or {}
+    try:
+        registry = get_cognitive_runtime().registry
+        claim = registry.confirm_alias(
+            mention=str(data.get("mention", "")),
+            candidate_entity=str(data.get("candidate_entity", "")),
+            evidence_ref=str(data.get("evidence_ref", "")),
+            admin_id=str(data.get("admin_id", "")),
+        )
+        return jsonify({"success": True, "claim_id": registry.claim_id(claim)})
+    except CognitiveContractError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+async def revoke_identity_alias():
+    data = await request.get_json(silent=True) or {}
+    try:
+        registry = get_cognitive_runtime().registry
+        claim = registry.revoke_claim_id(str(data.get("claim_id", "")))
+        return jsonify({"success": True, "claim_id": registry.claim_id(claim)})
+    except CognitiveContractError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
 
 async def clear_l1_buffer():
@@ -336,6 +395,9 @@ def register_manage_routes(context) -> None:
     prefix = f"/{PLUGIN_NAME}/manage"
 
     routes = [
+        (f"{prefix}/identity", list_identity_registry, ["GET"], "获取身份库"),
+        (f"{prefix}/identity/alias/confirm", confirm_identity_alias, ["POST"], "确认身份别名"),
+        (f"{prefix}/identity/alias/revoke", revoke_identity_alias, ["POST"], "撤销身份别名"),
         (f"{prefix}/l1/clear", clear_l1_buffer, ["POST"], "清空 L1 缓冲"),
         (f"{prefix}/l2/delete", delete_l2_memory, ["POST"], "删除 L2 记忆"),
         (f"{prefix}/l3/delete", delete_l3_kg, ["POST"], "删除 L3 图谱"),

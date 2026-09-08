@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .contracts import (
     BehaviorLoopResult,
     BehaviorTrace,
@@ -177,7 +179,13 @@ class CognitiveBehaviorRuntime:
     def observe(self, experience: CanonicalExperience):
         return self.situation.observe(experience)
 
-    def run(self, experience: CanonicalExperience, legacy: LegacyProactiveSignals | None = None) -> BehaviorLoopResult:
+    def run(
+        self,
+        experience: CanonicalExperience,
+        legacy: LegacyProactiveSignals | None = None,
+        *,
+        runtime_views: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> BehaviorLoopResult:
         lite = self.observe(experience)
         snapshot = TriggerSnapshot(
             previous_committed_state=self._previous_committed_state,
@@ -199,7 +207,7 @@ class CognitiveBehaviorRuntime:
                 )
             )
 
-        full = self.situation.build_full(experience, lite)
+        full = self.situation.build_full(experience, lite, runtime_views=runtime_views)
         participation = self.participation.decide(snapshot=snapshot)
         if participation.decision is not ParticipationDecision.PARTICIPATE:
             return BehaviorLoopResult(

@@ -1559,6 +1559,7 @@ class ProfileStorage(Component):
                 RESPONSE_EXPANSION_PARAMETER,
                 RESPONSE_LENGTH_PARAMETER,
                 MEMORY_RETRIEVAL_PARAMETER,
+                RELATIONSHIP_FAMILIARITY_PARAMETER,
             ):
                 matches = [
                     record

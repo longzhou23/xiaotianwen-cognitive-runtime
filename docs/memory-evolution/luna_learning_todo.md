@@ -672,23 +672,21 @@ BLOCKED 的具体规则缺口：
 
 ### R07 — 身份持久化
 
-状态：保持冻结，无需改动。
+状态：已按维护者明确授权解冻并完成本地实现，待生产重启验证。
 
-具体缺口：`EntityRegistry` 只拥有进程内的确认身份/alias；没有持久化 schema、人工确认写入口、冲突裁决、撤销语义或真实记录授权。保持 UID-first 和缺失 identity fail-closed，不将姓名或模糊文本固化。
+实现：`EntityRegistry` 成为唯一身份 owner，使用 `iris.identity-registry.v1` 校验和信封保存到插件数据目录 `cognitive/identity_registry.v1.json`，临时文件落盘后原子替换。启动时先校验旧文件；损坏、owner 不匹配、重复实体或 UID 冲突会令身份库 fail-closed，不覆盖原文件。平台稳定 UID 仍是唯一自动建实体来源。新增已认证管理 API：`GET /manage/identity` 列出实体和 opaque claim ID，`POST /manage/identity/alias/confirm` 只接受明确 entity、alias、证据引用和管理员 ID，`POST /manage/identity/alias/revoke` 按精确 claim ID 撤销。冲突的 confirmed alias 保留证据并解析为未知，不做自动裁决。
 
-验证：`tests/cognitive/test_identity_and_perspective.py` 已包含在本轮 `46 passed, 1 warning` 组合回归。
+验证：变更文件 `py_compile` 通过，`git diff --check` 通过。本轮遵循维护者此前“跳过测试、上线后慢慢 debug”的要求，没有运行 pytest；跨进程并发和真实损坏恢复仍待生产验证。
 
 下一张卡：R08。
 
 ### R08 — Situation 只读投影
 
-状态：保持冻结，无需改动。
+状态：已按维护者明确授权解冻并完成本地实现，待生产事件验证。
 
-实际读取入口与调用者：`SituationFull` 继续为 affect、relationship、behavioral prior、Persona 输出空只读映射；不从 legacy `favorability`、情绪文本或交互次数推断填值。
+实际读取入口与调用者：`_handle_cognitive_behavior()` 在同一事件内从现有 owner 收集版本化快照并传给 `CognitiveBehaviorRuntime`；`SituationBuilder` 只冻结 `committed_affect`、`committed_relationship`、`behavioral_prior` 和 `persona_read_only`，不持久化或反写。owner 没有提供、scope 不匹配、过期或格式错误时保持空映射。Persona 当前没有安全的事件级只读 owner，因此继续为空，未从 legacy 字段补造。
 
-验证：`tests/cognitive/test_p07_repairs.py tests/cognitive/test_shadow_runtime.py` 已包含在本轮 46 项组合回归。
-
-未验证：各 owner 的版本化只读 API 与失效语义尚未定义。
+验证：`py_compile` 通过；未运行 pytest。真实 Hook 顺序与 Trigger YES 后 RealizerRequest 可见性待生产事件验证。
 
 下一张卡：R09。
 
@@ -708,17 +706,21 @@ BLOCKED 的具体规则缺口：
 
 ### R10 — 最小长期行为策略消费者
 
-状态：保持冻结，无需改动。
+状态：已按维护者明确授权解冻并完成本地实现，待生产事件验证。
 
-已有 L18 的只读检索提示和 L20 群级无邀请插话开关各有独立 owner；没有把回复长度、熟悉度、纠正或 Review 转为通用 `BehavioralPrior`，也没有扩张到“是否/何时回复”的学习。
+实现：只把当前 private scope 中仍有效且管理员已批准的 `response_expansion`、`response_length`、`tool_memory_retrieval` 记录投影为 `iris.behavioral-prior.v1`；携带 owner、完整 scope、candidate ID 和 `permission_effect=none`。当前明确详细要求会移除历史短回答 prior，当前明确禁用工具会移除检索 prior。该视图供 Trigger YES 后的既有 RealizerRequest 读取，不新建工具调用、不改变发送权限，也不从 Review、普通纠正、语气或模糊表达自动学习。
+
+验证：`py_compile` 与 `git diff --check` 通过；未运行 pytest。真实 Provider 是否消费 RealizerRequest 中该投影待生产观察。
 
 下一张卡：R11。
 
 ### R11 — Affect 派生视图
 
-状态：保持冻结，无需改动。
+状态：已按维护者明确授权解冻并完成本地及 affection owner 接线，待生产重启验证。
 
-`astrbot_plugin_affection` 继续独占 current-affect；Iris 不读写、迁移或同步其 JSON，也不会让负面反馈改情绪或关系。需要 Affect owner 的版本化、脱敏、只读 API 后才可讨论投影；生产加载状态未知。
+实现：`astrbot_plugin_affection` 在其优先级 10 的请求 Hook 中发布 60 秒事件局部 `iris.affect-view.v1`，只含 owner、bot/user scope、`WARM|NEUTRAL|GUARDED`、`STEADY|STRAINED` 和生成/过期时间，不包含原始数值或存储对象。Iris 校验 schema、owner、当前 user 和有效期后投影到 `SituationFull.committed_affect`。affection 继续独占写入，Iris 不读写、迁移或同步其 JSON，反馈也不会通过此接口修改 Affect。
+
+验证：两侧 `py_compile` 通过；未运行 pytest。生产插件优先级、实际加载版本和真实事件快照待重启后验证。
 
 下一张卡：R12。
 

@@ -712,11 +712,11 @@ G4：Observatory。
 | R04 | 部分完成 | exact 链和失效聚合已有；重启 replay 缺少无正文的 durable observation 契约。 |
 | R05 | 本地完成 | capture/archive/Review/P2r0 组合回归通过，未做真实平台发送。 |
 | R06 | 本地完成 | `profile.enable` 生命周期和 Hook fail-closed 复验通过。 |
-| R07 | 冻结 | identity persistence 缺少唯一 owner/schema/撤销裁决。 |
-| R08 | 冻结 | Situation 继续只读空投影，不从 legacy 字段推断。 |
+| R07 | 本地完成 | Identity 单一 owner、校验和持久化、UID-first、人工 alias 确认/精确撤销和冲突 fail-closed 已接通；待生产重启验证。 |
+| R08 | 本地完成 | Situation 已接版本化 owner 快照并冻结为只读映射；缺失/过期/错误为空，Persona 无安全 owner 时仍为空。 |
 | R09 | 本地完成 | FAMILIAR 已进入既有受控表达 Hook，禁止虚构关系。 |
-| R10 | 冻结 | 未引入通用 BehavioralPrior 或自动改变回复策略。 |
-| R11 | 冻结 | affection 继续独占 Affect，Iris 不读写其数据。 |
+| R10 | 本地完成 | 已批准 private-scope 回复偏好投影为最小 BehavioralPrior；本轮明确要求覆盖，permission effect 为 none。 |
+| R11 | 本地完成 | affection owner 发布 60 秒脱敏 Affect 快照，Iris 只读校验投影，不接触 affection 存储。 |
 | R12 | 待授权 | 已形成最小隔离演练、历史单条回写、灰度和部署前置清单。 |
 
 本轮关键验证：回复偏好维护 `43 passed, 1 warning`；Persona revision `25 passed, 1 warning`；请求 Hook/表达偏好 `84 passed, 1 warning`；P2r0/Review/反馈组合 `85 passed, 1 skipped, 1 warning`；identity/Situation/Shadow `46 passed, 1 warning`。真实 KV、平台、Provider 与生产加载状态仍未验证。
@@ -724,7 +724,7 @@ G4：Observatory。
 
 ## 2026-09-08 备忘录整理与 GitHub 收口
 
-最新覆盖矩阵与剩余工作见 [记忆演化交付页](docs/memory-evolution/README.md)。R04 已补齐无正文 append-only 观察日志源码、重启重建和显式失效 API；测试代码新增但按用户要求未执行。实际 KV 无 CAS，L28 历史写继续关闭。只读 inventory 有一条 APPROVED，未写入。生产仅五文件回复偏好补丁已加载且 WebUI HTTP 200，本轮完整源码未部署。R07/R08/R10/R11 继续冻结。旧 R12 待授权记录由后续明确上线和 GitHub 同步授权覆盖，但不包含历史写入。
+最新覆盖矩阵与剩余工作见 [记忆演化交付页](docs/memory-evolution/README.md)。R07/R08/R10/R11 已由维护者明确解冻并完成本地接线；按此前要求只做语法和差异检查，未运行 pytest，尚待生产重启和真实事件验证。实际 KV 无 CAS 的历史状态由已准备的 AstrBot CAS 后端补丁处理；L28 真实历史写仍需精确目标授权。旧 R12 待授权记录由后续明确上线和 GitHub 同步授权覆盖，但不包含历史写入。
 
 
 ### R04 管理入口补齐

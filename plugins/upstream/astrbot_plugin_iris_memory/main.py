@@ -211,6 +211,9 @@ class IrisMemoryPlugin(Star):
             self.data_dir = data_dir
             self.config: Config = init_config(config, data_dir)
             logger.info(f"插件数据目录：{data_dir}")
+            get_cognitive_runtime().bind_identity_store(
+                Path(data_dir) / "cognitive" / "identity_registry.v1.json"
+            )
 
             components = create_components(context, self)
             self.component_manager: Optional[ComponentManager] = ComponentManager(
@@ -1582,8 +1585,12 @@ class IrisMemoryPlugin(Star):
             )
             prepared = runtime.pre_adapter.attach(event)
             legacy = await LegacyIrisProactiveSignalAdapter(self._state).read_consistent(event)
+            runtime_views = await self._collect_cognitive_runtime_views(event)
             result = runtime.run_behavior(
-                prepared.experience, legacy, runtime_mode=context.runtime_mode
+                prepared.experience,
+                legacy,
+                runtime_mode=context.runtime_mode,
+                runtime_views=runtime_views,
             )
         except Exception as exc:
             # Shadow preserves the frozen Legacy baseline.  Guard is deliberately
@@ -1621,6 +1628,74 @@ class IrisMemoryPlugin(Star):
             return True
 
         return False
+
+    async def _collect_cognitive_runtime_views(
+        self, event: AstrMessageEvent
+    ) -> dict[str, dict[str, object]]:
+        """Collect versioned read-only owner projections for SituationFull."""
+        from iris_memory.profile.response_preferences import (
+            MEMORY_RETRIEVAL_PARAMETER,
+            RELATIONSHIP_FAMILIARITY_PARAMETER,
+            explicit_detail_request,
+            explicit_no_tool_request,
+        )
+
+        views: dict[str, dict[str, object]] = {
+            "committed_affect": {},
+            "committed_relationship": {},
+            "behavioral_prior": {},
+            "persona_read_only": {},
+        }
+        storage = self._get_response_preference_storage()
+        records = (
+            await storage.active_response_preference_records_for_event(event)
+            if storage is not None
+            else None
+        )
+        message = str(getattr(event, "message_str", "") or "")
+        if records:
+            prior_values: dict[str, str] = {}
+            prior_candidates: list[str] = []
+            for record in records:
+                if record.parameter == RELATIONSHIP_FAMILIARITY_PARAMETER:
+                    views["committed_relationship"] = {
+                        "schema": "iris.relationship-view.v1",
+                        "owner": "ProfileStorage",
+                        "scope": record.scope.to_dict(),
+                        "state": record.value,
+                        "candidate_id": record.candidate_id,
+                        "expires_at": record.expires_at,
+                    }
+                    continue
+                if explicit_detail_request(message) and record.parameter == "response_length":
+                    continue
+                if explicit_no_tool_request(message) and record.parameter == MEMORY_RETRIEVAL_PARAMETER:
+                    continue
+                prior_values[record.parameter] = record.value
+                prior_candidates.append(record.candidate_id)
+            if prior_values:
+                views["behavioral_prior"] = {
+                    "schema": "iris.behavioral-prior.v1",
+                    "owner": "ProfileStorage",
+                    "scope": records[0].scope.to_dict(),
+                    "values": prior_values,
+                    "candidate_ids": tuple(prior_candidates),
+                    "permission_effect": "none",
+                }
+
+        affect = event.get_extra("iris_affect_view_v1")
+        if isinstance(affect, dict):
+            now = time.time()
+            if (
+                affect.get("schema") == "iris.affect-view.v1"
+                and affect.get("owner") == "astrbot_plugin_affection"
+                and type(affect.get("generated_at")) in (int, float)
+                and type(affect.get("expires_at")) in (int, float)
+                and float(affect["generated_at"]) <= now < float(affect["expires_at"])
+                and str(affect.get("user_id", "")) == str(event.get_sender_id())
+            ):
+                views["committed_affect"] = affect
+        return views
 
     async def _handle_reply_decision(self, event: AstrMessageEvent) -> bool:
         """主动回复统一决策执行点。
