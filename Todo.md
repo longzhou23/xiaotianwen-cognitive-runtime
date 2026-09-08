@@ -728,6 +728,15 @@ G4：Observatory。
 
 2026-09-08T04:36Z：R07/R08/R10/R11 已部署至 `azure-xtw-01`。完整 Iris v3.0.4 与 affection v1.2 均成功加载，Iris 异步初始化完成，HTTP 200；Identity v1 信封已创建并收紧为 `0600`。首次定向同步暴露旧生产基线不完整，已通过完整插件备份后同版本覆盖修复。未运行 pytest 或真实消息验收，未执行 L28 历史写。
 
+### P2b Shadow Candidate V1（2026-09-08）
+
+- [x] 新增冻结的 `p2b-shadow-candidate.v1` 契约和 checksummed append-only journal；支持重启重放、幂等创建、跨进程非阻塞文件锁、批准/拒绝/撤销/冲突/过期状态机，损坏或不确定写入时 fail-closed。
+- [x] 生产 composition 仅把满足既有 D02 门槛、完整 private UID scope 且能映射到至少两个不同 Episode 的 `response_length=SHORT` 精确反馈聚合投影为 PENDING shadow candidate。
+- [x] `auto_approve=false`、`auto_publish=false`、`permission_effect=NONE`；候选批准只更新 P2b journal，不写 ProfileStorage，不改变请求、工具权限、Participation、Persona、Affect 或 Relationship。
+- [x] 管理员入口复用 `iris_mem preference`：`p2b_status`、`p2b_evaluate`、`p2b_approve`、`p2b_reject`、`p2b_revoke`。观察台只显示模式、白名单、匿名状态计数和最近评估时间。
+- [ ] P2b candidate 到现有 `response_style_preference:v1` 的显式发布动作尚未开放；在定义逐参数映射与二次授权前，APPROVED shadow candidate 仍不会影响回复。
+- [ ] 通用 ReviewEvidence 映射继续关闭：当前 `ReviewEvidence.scope` 不含完整 platform/account/user/conversation 权威范围，不能安全泛化为用户偏好。
+
 
 ### R04 管理入口补齐
 

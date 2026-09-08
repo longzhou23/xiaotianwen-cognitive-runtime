@@ -284,6 +284,13 @@ def test_summary_projects_authoritative_review_store_and_effective_runtime_state
     review_store = InMemoryReviewStore()
     facts = {(EvidenceSourceType.HOST_RESULT, ref_id): record for ref_id, record in records.items()}
     run = review_episode(episode, outcomes, review_store, fact_envelopes=facts)
+    class P2bStore:
+        available = True
+
+        @staticmethod
+        def all_candidates():
+            return (SimpleNamespace(status=SimpleNamespace(value="PENDING")),)
+
     service = P1ObservatoryService(
         store,
         review_store,
@@ -304,6 +311,8 @@ def test_summary_projects_authoritative_review_store_and_effective_runtime_state
             "identity_claims": 4,
             "projection_counts": {"events": 9, "relationship": 2, "behavioral_prior": 5, "affect": 1},
             "last_projection_at": 1788796800.0,
+            "p2b_shadow_store": P2bStore(),
+            "p2b_shadow_last_evaluation_at": 1788796800.0,
         },
     )
 
@@ -329,6 +338,12 @@ def test_summary_projects_authoritative_review_store_and_effective_runtime_state
     assert adaptive["behavioral_prior"]["permission_effect"] == "none"
     assert adaptive["affect"] == {"available": True, "observed": 1, "owner": "astrbot_plugin_affection", "ttl_seconds": 60}
     assert adaptive["history_write"]["status"] == "LOCKED"
+    assert summary["p2b_shadow"]["enabled"] is True
+    assert summary["p2b_shadow"]["mode"] == "SHADOW"
+    assert summary["p2b_shadow"]["auto_approve"] is False
+    assert summary["p2b_shadow"]["auto_publish"] is False
+    assert summary["p2b_shadow"]["candidate_status_counts"]["PENDING"] == 1
+    assert summary["p2b_shadow"]["allowed_parameters"] == ["response_length"]
 
 
 def test_summary_reports_unavailable_review_store_without_false_zero_counts():
@@ -462,7 +477,7 @@ def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy()
     assert "phaseTitle" in source
     assert "Production Cognitive Runtime" in source
     assert "受控长期适应 · ENABLED" in source
-    assert "通用 P2b · DISABLED" in source
+    assert "p2bHeaderLabel" in source
     assert "P1 Experience &amp; Review Foundation" not in source
     assert "P1 FOUNDATION · ACCEPTED" not in source
     assert "长期适应运行态" in source
@@ -473,6 +488,30 @@ def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy()
     assert "Finding 已记录，但当前不可 promotion" in source
     assert "引用：" in source
     assert "no_evidence_reason" in source
+
+
+def test_frontend_exposes_p2b_shadow_contract_without_sensitive_fields():
+    view = Path(__file__).parents[2] / "iris_memory" / "web" / "frontend" / "src" / "views" / "CognitiveObservatoryView.vue"
+    source = view.read_text(encoding="utf-8")
+    panel_start = source.index('class="panel pa-4 mb-3 p2b-shadow-panel"')
+    panel_end = source.index('<v-card v-if="!summary?.available"', panel_start)
+    panel = source[panel_start:panel_end]
+
+    assert "summary.p2b_shadow" in panel
+    assert "模式 ·" in panel and "p2bShadow?.mode" in panel
+    assert "auto_approve" in panel
+    assert "auto_publish" in panel
+    assert "candidate_status_counts" in source
+    assert "last_evaluation_at" in source
+    assert "allowed_parameters" in source
+    assert "permission_effect" in source
+    assert "当前为 SHADOW" in panel
+    assert "未经人工批准不会进入回复偏好" in panel
+    assert "candidate_id" not in panel
+    assert "candidateId" not in panel
+    assert "p2bShadow?.user" not in panel
+    assert "p2bShadow?.scope" not in panel
+    assert "p2bShadow?.message" not in panel
 
 
 class _Context:

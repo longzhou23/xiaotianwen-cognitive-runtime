@@ -12,7 +12,7 @@
           <v-chip :color="statusColor(summary?.review?.status)" variant="tonal" prepend-icon="mdi-file-search-outline">Review · {{ statusLabel(summary?.review?.status) }}</v-chip>
           <v-chip :color="statusColor(summary?.promotion?.status)" variant="tonal" prepend-icon="mdi-gate">Promotion · {{ statusLabel(summary?.promotion?.status) }}</v-chip>
           <v-chip color="success" variant="tonal" prepend-icon="mdi-account-heart-outline">受控长期适应 · ENABLED</v-chip>
-          <v-chip color="grey" variant="tonal" prepend-icon="mdi-brain-off-outline">通用 P2b · DISABLED</v-chip>
+          <v-chip :color="p2bHeaderColor" variant="tonal" prepend-icon="mdi-flask-outline">{{ p2bHeaderLabel }}</v-chip>
         </div>
         <v-alert :color="summary?.promotion?.enabled ? 'info' : 'amber-darken-2'" variant="tonal" density="compact" class="mt-4 mb-0">
           <template v-if="summary?.promotion?.enabled">
@@ -41,7 +41,7 @@
         <v-chip size="small" :color="statusColor(summary.review?.status)">Review · {{ statusLabel(summary.review?.status) }}</v-chip>
         <v-chip size="small" :color="statusColor(summary.promotion?.status)">Promotion · {{ statusLabel(summary.promotion?.status) }}</v-chip>
         <v-chip size="small" color="success">受控长期适应 · ENABLED</v-chip>
-        <v-chip size="small" color="grey">通用 P2b · DISABLED</v-chip>
+        <v-chip size="small" :color="p2bHeaderColor">{{ p2bHeaderLabel }}</v-chip>
       </div>
       <div class="text-caption text-medium-emphasis mt-2">
          <span v-if="summary.review_store === 'UNAVAILABLE'">ReviewStore 当前不可用，计数不会以 0 代替。</span>
@@ -69,6 +69,57 @@
         </v-col>
       </v-row>
       <v-alert color="amber-darken-2" variant="tonal" density="compact" class="mt-3 mb-0">L28 历史数据写入仍锁定；仅在精确单条授权后开放。日常请求中的已批准偏好、关系熟悉度、BehavioralPrior 和 Affect 只读投影可继续生效。</v-alert>
+    </v-card>
+
+    <v-card variant="flat" class="panel pa-4 mb-3 p2b-shadow-panel">
+      <div class="d-flex align-center flex-wrap ga-2 mb-3">
+        <div>
+          <div class="section-label mb-0">P2b 影子观察</div>
+          <div class="text-caption text-medium-emphasis">候选只在影子层评估，未经人工批准不会进入回复偏好。</div>
+        </div>
+        <v-spacer />
+        <v-chip size="small" color="info" prepend-icon="mdi-eye-outline">模式 · {{ p2bShadow?.mode || '等待摘要' }}</v-chip>
+        <v-chip size="small" :color="p2bShadow?.auto_approve === false ? 'success' : 'amber-darken-2'">自动批准 · {{ p2bFlagLabel(p2bShadow?.auto_approve) }}</v-chip>
+        <v-chip size="small" :color="p2bShadow?.auto_publish === false ? 'success' : 'amber-darken-2'">自动发布 · {{ p2bFlagLabel(p2bShadow?.auto_publish) }}</v-chip>
+      </div>
+
+      <v-alert v-if="!p2bShadow" color="grey" variant="tonal" density="compact" class="mb-0">
+        当前摘要尚未提供 <code>summary.p2b_shadow</code>；观察台不会用旧的 P1 计数猜测 P2b 状态。
+      </v-alert>
+      <template v-else>
+        <v-row dense>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="p2b-overview-card pa-3 fill-height">
+              <div class="section-label">候选状态</div>
+              <div class="d-flex flex-wrap ga-2">
+                <v-chip v-for="item in p2bStatusCards" :key="item.status" size="small" :color="item.color" variant="tonal">{{ item.label }} · {{ item.count }}</v-chip>
+              </div>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="p2b-overview-card pa-3 fill-height">
+              <div class="section-label">最近评估</div>
+              <div class="text-h6">{{ p2bEvaluationTime }}</div>
+              <div class="text-caption text-medium-emphasis mt-1">只记录评估时间和状态统计，不展示候选详情。</div>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="p2b-overview-card pa-3 fill-height">
+              <div class="section-label">权限影响</div>
+              <div class="text-h6 text-success">{{ p2bPermissionEffect }}</div>
+              <div class="text-caption text-medium-emphasis mt-1">影子评估不能改变是否回复、回复时间、工具权限或人格。</div>
+            </v-card>
+          </v-col>
+        </v-row>
+        <v-card variant="tonal" color="blue-grey-darken-1" class="mt-3 pa-3">
+          <div class="section-label">允许评估参数</div>
+          <div class="d-flex flex-wrap ga-2">
+            <v-chip v-for="parameter in p2bParameters" :key="parameter" size="small" color="info" variant="outlined">{{ parameter }}</v-chip>
+            <span v-if="!p2bParameters.length" class="text-body-2 text-medium-emphasis">暂无参数</span>
+          </div>
+        </v-card>
+        <v-alert color="success" variant="tonal" density="compact" class="mt-3 mb-0">当前为 SHADOW：可以生成和统计候选，但自动批准与自动发布必须保持关闭。</v-alert>
+      </template>
     </v-card>
 
     <v-card v-if="!summary?.available" variant="flat" class="pa-7 text-center mb-3">
@@ -159,6 +210,24 @@ import { getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode,
 const summary = ref<any>(null); const episodes = ref<any[]>([]); const demos = ref<any[]>([]); const detail = ref<any>(null); const previewResult = ref<any>(null)
 const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple')
 const phaseTitle = computed(() => summary.value?.phase || 'Cognitive Observatory')
+const p2bShadow = computed(() => summary.value?.p2b_shadow || null)
+const p2bHeaderLabel = computed(() => p2bShadow.value ? `P2b 影子模式 · ${p2bShadow.value.mode || 'SHADOW'}` : 'P2b 影子摘要 · 未接通')
+const p2bHeaderColor = computed(() => p2bShadow.value?.mode === 'SHADOW' ? 'info' : 'grey')
+const p2bStatusCards = computed(() => {
+  const counts = p2bShadow.value?.candidate_status_counts
+  const labels: Record<string, { label: string; color: string }> = {
+    PENDING: { label: '待批准', color: 'amber-darken-2' },
+    APPROVED: { label: '已批准', color: 'success' },
+    REJECTED: { label: '已拒绝', color: 'grey' },
+    REVOKED: { label: '已撤销', color: 'deep-orange' },
+    CONFLICTED: { label: '冲突', color: 'error' },
+    EXPIRED: { label: '已过期', color: 'grey-darken-1' },
+  }
+  return Object.keys(labels).map(status => ({ status, count: typeof counts?.[status] === 'number' ? counts[status] : 0, ...labels[status] }))
+})
+const p2bParameters = computed(() => Array.isArray(p2bShadow.value?.allowed_parameters) ? p2bShadow.value.allowed_parameters : [])
+const p2bEvaluationTime = computed(() => formatObservedAt(p2bShadow.value?.last_evaluation_at))
+const p2bPermissionEffect = computed(() => String(p2bShadow.value?.permission_effect || 'NONE').toUpperCase())
 const summaryCards = computed(() => [{ label: 'Episodes', value: summary.value?.episodes ?? '—' }, { label: 'Finalized', value: summary.value?.finalized_episodes ?? '—' }, { label: 'Outcomes', value: summary.value?.outcomes ?? '—' }, { label: 'Review Runs', value: summary.value?.review_runs ?? '—' }, { label: 'Findings', value: summary.value?.review_findings ?? '—' }, { label: 'Evidence', value: summary.value?.review_evidence ?? '—' }])
 const adaptiveCards = computed(() => {
   const a = summary.value?.adaptive_runtime || {}
@@ -183,6 +252,8 @@ const stateColor = (value: string) => value === 'FINALIZED' ? 'success' : value 
 const attachmentColor = (value: string) => value === 'ATTACHED' ? 'success' : value === 'REJECTED' ? 'error' : 'grey'
 const formatTime = (value?: string) => value ? value.replace('T', ' ').replace('+00:00', ' UTC') : '—'
 const formatUnix = (value?: number) => value ? new Date(value * 1000).toLocaleString() : '—'
+const formatObservedAt = (value?: string | number) => typeof value === 'number' ? formatUnix(value) : formatTime(value)
+const p2bFlagLabel = (value?: boolean) => value === false ? '关闭' : value === true ? '开启' : '未提供'
 const pretty = (value: unknown) => JSON.stringify(value, null, 2)
 async function loadEpisodes() { loading.value = true; try { const result = await getObservatoryEpisodes({ state: state.value, query: query.value, limit: 50 }); episodes.value = result.episodes || [] } catch (e: any) { error.value = e.message || '读取 Episode 失败' } finally { loading.value = false } }
 async function loadAll() { error.value = ''; await Promise.all([getObservatorySummary().then(v => summary.value = v), getObservatoryDemoCases().then(v => demos.value = v), loadEpisodes()]).catch((e: any) => error.value = e.message || '加载失败') }
@@ -193,5 +264,5 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.adaptive-panel { background: linear-gradient(135deg, rgba(0, 137, 123, .06), rgba(124, 77, 255, .05)); }.adaptive-card { min-height: 116px; background: rgba(var(--v-theme-surface), .72); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
+.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.adaptive-panel { background: linear-gradient(135deg, rgba(0, 137, 123, .06), rgba(124, 77, 255, .05)); }.adaptive-card { min-height: 116px; background: rgba(var(--v-theme-surface), .72); }.p2b-shadow-panel { background: linear-gradient(135deg, rgba(33, 150, 243, .08), rgba(0, 188, 212, .06)); }.p2b-overview-card { min-height: 126px; background: rgba(var(--v-theme-surface), .72); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
 </style>

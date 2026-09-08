@@ -99,6 +99,11 @@ class ResponsePreferenceCommandHandler(CommandHandler):
             "feedback_conflict <observation_id>": "将一条精确反馈观察标为冲突，停止参与后续巩固",
             "approve <candidate_id>": "批准一个已核实来源（不自动续期）",
             "revoke <candidate_id>": "撤销一个候选或已批准记录",
+            "p2b_status": "查看 P2b shadow 候选（管理员审计视图）",
+            "p2b_evaluate": "立即执行一次影子评估；不批准、不发布",
+            "p2b_approve <candidate_id>": "批准 shadow 候选；仍不发布到回复偏好",
+            "p2b_reject <candidate_id>": "拒绝 shadow 候选",
+            "p2b_revoke <candidate_id>": "撤销 shadow 候选",
         }
 
     def _storage(self) -> ProfileStorage | None:
@@ -117,6 +122,8 @@ class ResponsePreferenceCommandHandler(CommandHandler):
         args: ParsedArgs,
         sub_command: str | None = None,
     ) -> CommandResult:
+        if sub_command and sub_command.startswith("p2b_"):
+            return self._p2b_operation(event, sub_command, args)
         storage = self._storage()
         if storage is None:
             return CommandResult(False, "回复表达偏好存储不可用（需要启用 profile）")
@@ -157,6 +164,50 @@ class ResponsePreferenceCommandHandler(CommandHandler):
         if sub_command == "help":
             return CommandResult(True, self.get_help_text())
         return CommandResult(False, f"未知的子指令: {sub_command}\n{self.get_help_text()}")
+
+    def _p2b_operation(
+        self, event: AstrMessageEvent, operation: str, args: ParsedArgs
+    ) -> CommandResult:
+        from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
+
+        runtime = get_cognitive_runtime()
+        store = getattr(runtime, "observatory_p2b_shadow_store", None)
+        if store is None or not getattr(store, "available", False):
+            return CommandResult(False, "P2b shadow candidate journal 不可用；未执行操作")
+        try:
+            if operation == "p2b_evaluate":
+                evaluate = getattr(runtime, "p2b_shadow_evaluate", None)
+                if not callable(evaluate):
+                    return CommandResult(False, "P2b shadow evaluator 未接入")
+                created = int(evaluate())
+                return CommandResult(True, f"✅ 影子评估完成，新增 {created} 个 PENDING 候选；自动批准和发布均关闭")
+            if operation == "p2b_status":
+                items = store.all_candidates()
+                lines = ["P2b Shadow Candidates（permission effect=NONE；批准不等于发布）"]
+                lines.extend(
+                    f"{item.candidate_id} | {item.status.value} | {item.parameter.value}={item.proposed_value} | evidence={len(item.evidence)} | expires_at={item.expires_at.isoformat() if item.expires_at else '—'}"
+                    for item in items
+                )
+                return CommandResult(True, "\n".join(lines if items else lines + ["（无候选）"]))
+            candidate_id = _candidate_arg(args)
+            if not candidate_id:
+                return CommandResult(False, f"用法: iris_mem preference {operation} <candidate_id>")
+            actor = _actor_id(event)
+            if operation == "p2b_approve":
+                item = store.approve(candidate_id, actor=actor)
+            elif operation == "p2b_reject":
+                item = store.reject(candidate_id, actor=actor)
+            elif operation == "p2b_revoke":
+                item = store.revoke(candidate_id, actor=actor)
+            else:
+                return CommandResult(False, f"未知的 P2b 子指令: {operation}")
+            return CommandResult(
+                True,
+                f"✅ {item.candidate_id} → {item.status.value}；未发布到 ProfileStorage，不影响当前回复",
+            )
+        except Exception as exc:  # noqa: BLE001 - admin boundary must fail closed
+            logger.warning("P2b shadow 管理操作失败：%s", exc)
+            return CommandResult(False, "P2b shadow 操作失败；未回报成功，也未发布偏好")
 
     def _feedback_operation(self, operation: str, args: ParsedArgs) -> CommandResult:
         from iris_memory.cognitive.response_preference_feedback import (

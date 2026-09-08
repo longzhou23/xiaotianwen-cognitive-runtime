@@ -119,6 +119,7 @@ class P1ObservatoryService:
         findings_value: int | str = sum(len(run.findings) for run in runs) if review_data_available else "Unavailable"
         evidence_value: int | str = evidence_count if review_data_available else "Unavailable"
         interaction_trace = self._interaction_trace_projection()
+        p2b_shadow = self._p2b_shadow_projection()
         return {
             "available": True,
             "phase": phase,
@@ -167,11 +168,39 @@ class P1ObservatoryService:
             "semantic_evaluator": self._runtime_state.get("semantic_evaluator"),
             "interaction_trace": interaction_trace,
             "behavioral_learning": {
-                "enabled": self._state_bool("p2b_enabled"),
-                "status": "ENABLED" if self._state_bool("p2b_enabled") else "DISABLED",
-                "label": "P2b 尚未启用",
+                "enabled": p2b_shadow["enabled"],
+                "status": "SHADOW" if p2b_shadow["enabled"] else "DISABLED",
+                "label": "P2b 影子候选已启用" if p2b_shadow["enabled"] else "P2b 尚未启用",
             },
+            "p2b_shadow": p2b_shadow,
             "adaptive_runtime": self._adaptive_runtime_projection(),
+        }
+
+    def _p2b_shadow_projection(self) -> dict[str, Any]:
+        store = self._runtime_state.get("p2b_shadow_store")
+        statuses = {name: 0 for name in ("PENDING", "APPROVED", "REJECTED", "REVOKED", "CONFLICTED", "EXPIRED")}
+        enabled = store is not None and bool(getattr(store, "available", False))
+        if enabled:
+            try:
+                for candidate in store.all_candidates():
+                    status = getattr(getattr(candidate, "status", None), "value", None)
+                    if status in statuses:
+                        statuses[status] += 1
+            except Exception:
+                enabled = False
+                statuses = {name: 0 for name in statuses}
+        return {
+            "enabled": enabled,
+            "mode": "SHADOW",
+            "auto_approve": False,
+            "auto_publish": False,
+            "permission_effect": "NONE",
+            "allowed_scope": "PRIVATE_UID_ONLY",
+            "allowed_parameters": ["response_length"],
+            "minimum_exact_evidence": 2,
+            "minimum_distinct_episodes": 2,
+            "candidate_status_counts": statuses,
+            "last_evaluation_at": self._runtime_state.get("p2b_shadow_last_evaluation_at"),
         }
 
     def _adaptive_runtime_projection(self) -> dict[str, Any]:

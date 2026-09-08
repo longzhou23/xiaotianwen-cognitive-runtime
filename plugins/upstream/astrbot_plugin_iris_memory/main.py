@@ -42,6 +42,13 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from iris_memory.cognitive.contracts import EventExecutionContext, RuntimeMode
+from iris_memory.cognitive.behavior_candidate import (
+    AppendOnlyBehaviorCandidateStore,
+    BehaviorParameter,
+    CandidateEvidence,
+    PrivateUIDScope,
+    ShadowCandidateEvaluator,
+)
 from iris_memory.cognitive.episode import EpisodeState
 from iris_memory.cognitive.episode_lifecycle import (
     MAX_EPISODES_PER_SCAN,
@@ -269,6 +276,9 @@ class IrisMemoryPlugin(Star):
             self._response_length_feedback = ResponseLengthFeedbackReviewObserverV1(
                 Path(self.data_dir) / "cognitive" / "response_length_feedback_observation.v1.jsonl"
             )
+            self._p2b_shadow_store = None
+            self._p2b_shadow_evaluator = ShadowCandidateEvaluator()
+            self._p2b_shadow_last_evaluation_at: float | None = None
             self._production_review_store = None
             self._production_review_completion = None
             self._production_review_evidence_enabled = False
@@ -495,6 +505,63 @@ class IrisMemoryPlugin(Star):
                 "P2r0 historical archive wiring initialization failed; archive remains unavailable"
             )
 
+    def _init_p2b_shadow(self) -> None:
+        """Open the message-free candidate journal; never publish from here."""
+        try:
+            self._p2b_shadow_store = AppendOnlyBehaviorCandidateStore(
+                Path(self.data_dir) / "cognitive" / "behavior_candidates.v1.jsonl"
+            )
+            logger.info("P2b shadow candidate journal enabled (auto approve/publish disabled)")
+        except Exception:
+            self._p2b_shadow_store = None
+            logger.exception("P2b shadow candidate journal unavailable; candidate generation disabled")
+        self._sync_observatory_runtime_state()
+
+    def _run_p2b_shadow_evaluation(self) -> int:
+        """Project eligible exact feedback into PENDING shadow candidates only."""
+        store = self._p2b_shadow_store
+        observer = self._response_length_feedback
+        episode_store = self._episode_store
+        if store is None or observer is None or episode_store is None:
+            return 0
+        created = 0
+        try:
+            source_episode = {
+                outcome.source_event_id: outcome.target_episode_id
+                for outcome in episode_store.get_outcomes()
+                if outcome.source_event_id
+            }
+            for aggregate in observer.aggregates():
+                if not aggregate.eligible or aggregate.parameter != "response_length":
+                    continue
+                evidence = tuple(
+                    CandidateEvidence(source_episode[ref[0]], ref[2])
+                    for ref in aggregate.feedback_refs
+                    if ref[0] in source_episode
+                )
+                if len({item.episode_id for item in evidence}) < 2:
+                    continue
+                scope = aggregate.scope
+                candidate = self._p2b_shadow_evaluator.evaluate(
+                    scope=PrivateUIDScope(
+                        platform_id=scope.platform_id,
+                        account_id=scope.account_id,
+                        user_id=scope.user_id,
+                        conversation_id=scope.conversation_id,
+                    ),
+                    parameter=BehaviorParameter.RESPONSE_LENGTH,
+                    proposed_value=aggregate.value,
+                    evidence=evidence,
+                )
+                existed = store.get(candidate.candidate_id) is not None
+                store.append_candidate(candidate)
+                created += 0 if existed else 1
+            self._p2b_shadow_last_evaluation_at = time.time()
+        except Exception:
+            logger.exception("P2b shadow evaluation failed closed; no preference was published")
+        self._sync_observatory_runtime_state()
+        return created
+
     def _sync_observatory_runtime_state(self) -> None:
         """Publish read-only effective-state references for Observatory routes.
 
@@ -543,6 +610,9 @@ class IrisMemoryPlugin(Star):
                 self, "_response_length_feedback", None
             )
             runtime.observatory_feedback_observer = runtime.response_length_feedback_observer
+            runtime.observatory_p2b_shadow_store = self._p2b_shadow_store
+            runtime.observatory_p2b_shadow_last_evaluation_at = self._p2b_shadow_last_evaluation_at
+            runtime.p2b_shadow_evaluate = self._run_p2b_shadow_evaluation
         except Exception:
             # A missing observability projection must never affect cognition or
             # plugin startup.  Routes will report unavailable state instead.
@@ -828,6 +898,8 @@ class IrisMemoryPlugin(Star):
         # of Review/Archive wiring and has no in-memory fallback authority.
         self._init_p2r0_capture_service()
         self._init_p2r0_archive_service()
+        self._init_p2b_shadow()
+        self._run_p2b_shadow_evaluation()
         self._init_episode_lifecycle_owner()
 
         # 1. 记忆组件初始化
@@ -953,6 +1025,7 @@ class IrisMemoryPlugin(Star):
                 self._sliding_window.cleanup(self._state.get_whitelist())
                 self._cleanup_stale_active()
                 sync_stats_group_state(self._state, self._stats)
+                self._run_p2b_shadow_evaluation()
             except Exception as e:
                 logger.warning(f"Iris Reply: periodic save error: {e}")
 

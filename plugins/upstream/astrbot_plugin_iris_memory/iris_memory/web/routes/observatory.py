@@ -14,6 +14,7 @@ def get_observatory_service() -> P1ObservatoryService:
     runtime = get_cognitive_runtime()
     observer = runtime.episode_observer
     feedback = getattr(runtime, "observatory_feedback_observer", None)
+    p2b_store = getattr(runtime, "observatory_p2b_shadow_store", None)
     registry = getattr(runtime, "registry", None)
     try:
         entity_count = len(registry.entities()) if registry is not None else None
@@ -41,6 +42,10 @@ def get_observatory_service() -> P1ObservatoryService:
             "identity_claims": claim_count,
             "projection_counts": dict(getattr(runtime, "observatory_projection_counts", {})),
             "last_projection_at": getattr(runtime, "observatory_last_projection_at", None),
+            "p2b_shadow_store": p2b_store,
+            "p2b_shadow_last_evaluation_at": getattr(
+                runtime, "observatory_p2b_shadow_last_evaluation_at", None
+            ),
         },
     )
 
