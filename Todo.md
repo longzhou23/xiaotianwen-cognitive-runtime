@@ -735,3 +735,8 @@ G4：Observatory。
 ### R04 生产接线
 
 2026-09-08T01:45:04Z 定向五文件补丁已部署；capture/archive/Iris 异步初始化完成，HTTP 200。详情见 [交付页](docs/memory-evolution/README.md) 最新节。未修改配置或历史维护，未跑测试或恢复演练。CAS 和冻结事项继续保留。
+
+
+## R02 后端 CAS 开发补充
+
+已在 AstrBot 源码中实现 BaseDatabase 可选接口、SQLite BEGIN IMMEDIATE 条件事务、SharedPreferences FIFO CAS 和 PluginKVStoreMixin 接口。限定 response_style_preference:v1；禁止预写缓存、缺记录不创建、冲突返回 False、成功在 commit 后返回。独立连接竞争、队列顺序、缓存读回及故障用例已补，按既有要求未执行。生产尚未安装，历史维护仍关闭。可应用源码补丁、基线哈希和限制见 [CAS 开发说明](deploy/astrbot/patches/response-preference-cas.md)。

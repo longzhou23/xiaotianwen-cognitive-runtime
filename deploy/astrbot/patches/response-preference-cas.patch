@@ -1,0 +1,363 @@
+diff --git a/astrbot/core/db/__init__.py b/astrbot/core/db/__init__.py
+index 39d9e3f3..28262278 100644
+--- a/astrbot/core/db/__init__.py
++++ b/astrbot/core/db/__init__.py
+@@ -569,6 +569,26 @@ class BaseDatabase(abc.ABC):
+         """Insert a new preference record."""
+         ...
+ 
++    async def compare_and_swap_preference(
++        self, scope: str, scope_id: str, key: str, expected: dict, replacement: dict
++    ) -> bool:
++        """Optionally replace a committed preference atomically.
++
++        Args:
++            scope: Preference namespace.
++            scope_id: Owner within the namespace.
++            key: Preference key.
++            expected: Expected committed JSON envelope.
++            replacement: Desired JSON envelope.
++
++        Returns:
++            True on commit, False on missing or mismatched data.
++
++        Raises:
++            NotImplementedError: This backend has no atomic implementation.
++        """
++        raise NotImplementedError("database backend lacks conditional writes")
++
+     @abc.abstractmethod
+     async def get_preference(self, scope: str, scope_id: str, key: str) -> Preference:
+         """Get a preference by scope ID and key."""
+diff --git a/astrbot/core/db/sqlite.py b/astrbot/core/db/sqlite.py
+index 086dd30d..c007833f 100644
+--- a/astrbot/core/db/sqlite.py
++++ b/astrbot/core/db/sqlite.py
+@@ -1369,6 +1369,69 @@ class SQLiteDatabase(BaseDatabase):
+                     session.add(new_preference)
+                 return existing_preference or new_preference
+ 
++    async def compare_and_swap_preference(
++        self, scope, scope_id, key, expected, replacement
++    ) -> bool:
++        """Replace an existing preference within a SQLite write transaction.
++
++        Args:
++            scope: Plugin namespace.
++            scope_id: Owning plugin identifier.
++            key: Bounded response preference key.
++            expected: Expected JSON envelope.
++            replacement: Replacement JSON envelope.
++
++        Returns:
++            True after commit; False on missing or mismatched data.
++
++        Raises:
++            ValueError: Unsupported namespace or invalid JSON.
++            Exception: Database failure; commit failures may be ambiguous.
++        """
++        if scope != "plugin" or key != "response_style_preference:v1" or not scope_id:
++            raise ValueError(
++                "conditional writes are restricted to response preferences"
++            )
++        expected_json = json.dumps(
++            expected,
++            sort_keys=True,
++            separators=(",", ":"),
++            ensure_ascii=False,
++            allow_nan=False,
++        )
++        json.dumps(replacement, allow_nan=False)
++        async with self.get_db() as session:
++            try:
++                # Reserve the writer before comparison, including other processes.
++                await session.execute(text("BEGIN IMMEDIATE"))
++                result = await session.execute(
++                    select(Preference).where(
++                        Preference.scope == scope,
++                        Preference.scope_id == scope_id,
++                        Preference.key == key,
++                    )
++                )
++                row = result.scalar_one_or_none()
++                if (
++                    row is None
++                    or json.dumps(
++                        row.value,
++                        sort_keys=True,
++                        separators=(",", ":"),
++                        ensure_ascii=False,
++                        allow_nan=False,
++                    )
++                    != expected_json
++                ):
++                    await session.rollback()
++                    return False
++                row.value = replacement
++                await session.commit()
++                return True
++            except BaseException:
++                await session.rollback()
++                raise
++
+     async def get_preference(self, scope, scope_id, key):
+         """Get a preference by key."""
+         async with self.get_db() as session:
+diff --git a/astrbot/core/utils/plugin_kv_store.py b/astrbot/core/utils/plugin_kv_store.py
+index 88460c8e..466af919 100644
+--- a/astrbot/core/utils/plugin_kv_store.py
++++ b/astrbot/core/utils/plugin_kv_store.py
+@@ -26,3 +26,30 @@ class PluginKVStoreMixin:
+     async def delete_kv_data(self, key: str) -> None:
+         """删除指定插件存储的键值对"""
+         await sp.remove_async("plugin", self.plugin_id, key)
++
++    async def compare_and_swap_kv_data(
++        self, key: str, expected: dict, replacement: dict
++    ) -> bool:
++        """Conditionally replace the plugin's existing response preference payload.
++
++        Args:
++            key: Must be response_style_preference:v1.
++            expected: Exact expected JSON payload.
++            replacement: Desired JSON payload.
++
++        Returns:
++            True on commit, False on absence or mismatch.
++
++        Raises:
++            ValueError: Unsupported key or payload type.
++            Exception: Backend failure, without unconditional fallback.
++        """
++        if (
++            key != "response_style_preference:v1"
++            or type(expected) is not dict
++            or type(replacement) is not dict
++        ):
++            raise ValueError("CAS requires the bounded key and dictionary payloads")
++        return await sp.compare_and_swap_async(
++            "plugin", self.plugin_id, key, expected, replacement
++        )
+diff --git a/astrbot/core/utils/shared_preferences.py b/astrbot/core/utils/shared_preferences.py
+index b829311b..f4037880 100644
+--- a/astrbot/core/utils/shared_preferences.py
++++ b/astrbot/core/utils/shared_preferences.py
+@@ -22,7 +22,7 @@ _WriteOperation = tuple[
+     str,
+     str | None,
+     Any,
+-    asyncio.Future[None] | None,
++    asyncio.Future[Any] | None,
+ ]
+ 
+ 
+@@ -79,6 +79,10 @@ class SharedPreferences:
+         """
+         action, scope, scope_id, key, value, _ = operation
+         with self._cache_lock:
++            if scope == "plugin" and key == "response_style_preference:v1":
++                # Read committed state rather than a speculative local overlay.
++                self._cache.pop((scope, scope_id, key), None)
++                return
+             if action == "put" and key is not None:
+                 self._cache[(scope, scope_id, key)] = deepcopy(value)
+             elif action == "remove" and key is not None:
+@@ -148,8 +152,14 @@ class SharedPreferences:
+                 return
+ 
+             action, scope, scope_id, key, value, completion = operation
++            result = None
+             try:
+-                if action == "put" and key is not None:
++                if action == "cas" and key is not None:
++                    expected, replacement = value
++                    result = await self.db_helper.compare_and_swap_preference(
++                        scope, scope_id, key, {"val": expected}, {"val": replacement}
++                    )
++                elif action == "put" and key is not None:
+                     await self.db_helper.insert_preference_or_update(
+                         scope,
+                         scope_id,
+@@ -175,7 +185,7 @@ class SharedPreferences:
+                     completion.set_exception(exc)
+             else:
+                 if completion is not None and not completion.done():
+-                    completion.set_result(None)
++                    completion.set_result(result)
+             finally:
+                 queue.task_done()
+ 
+@@ -275,6 +285,8 @@ class SharedPreferences:
+         await self.initialize()
+         if scope_id is None or key is None:
+             return default
++        if scope == "plugin" and key == "response_style_preference:v1":
++            await self.flush()
+         with self._cache_lock:
+             value = self._cache.get((scope, scope_id, key), _MISSING)
+             if value is not _MISSING:
+@@ -378,6 +390,46 @@ class SharedPreferences:
+         self._submit_write(operation)
+         await completion
+ 
++    async def compare_and_swap_async(
++        self, scope: str, scope_id: str, key: str, expected: Any, replacement: Any
++    ) -> bool:
++        """Serialize CAS with preceding ordinary writes without speculative caching.
++
++        Args:
++            scope: Plugin namespace.
++            scope_id: Owning plugin identifier.
++            key: Bounded response preference key.
++            expected: Expected committed payload.
++            replacement: Desired payload.
++
++        Returns:
++            True after commit or False on comparison miss.
++
++        Raises:
++            ValueError: Unsupported scope.
++            NotImplementedError: Unsupported backend.
++        """
++        if scope != "plugin" or key != "response_style_preference:v1" or not scope_id:
++            raise ValueError(
++                "conditional writes are restricted to response preferences"
++            )
++        if not callable(getattr(self.db_helper, "compare_and_swap_preference", None)):
++            raise NotImplementedError("database backend lacks conditional writes")
++        await self.initialize()
++        completion = asyncio.get_running_loop().create_future()
++        self._submit_write(
++            (
++                "cas",
++                scope,
++                scope_id,
++                key,
++                (deepcopy(expected), deepcopy(replacement)),
++                completion,
++            )
++        )
++        # Cancellation cannot cancel a transaction already queued for commit.
++        return await asyncio.shield(completion)
++
+     async def session_put(self, umo: str, key: str, value: Any) -> None:
+         await self.put_async("umo", umo, key, value)
+ 
+diff --git a/tests/unit/test_shared_preferences.py b/tests/unit/test_shared_preferences.py
+index 86fe7691..5adab2ae 100644
+--- a/tests/unit/test_shared_preferences.py
++++ b/tests/unit/test_shared_preferences.py
+@@ -266,3 +266,113 @@ async def test_sync_get_reads_persisted_value_with_exhausted_pool(preferences):
+     finally:
+         for connection in connections:
+             await connection.close()
++
++
++@pytest.mark.asyncio
++async def test_response_cas_missing_conflict_commit_and_committed_read(preferences):
++    store, database = preferences
++    key = "response_style_preference:v1"
++    before, after = {"version": 1}, {"version": 2}
++    assert not await store.compare_and_swap_async(
++        "plugin", "fixture-owner", key, before, after
++    )
++    await store.put_async("plugin", "fixture-owner", key, before)
++    assert not await store.compare_and_swap_async(
++        "plugin", "fixture-owner", key, after, before
++    )
++    assert await store.compare_and_swap_async(
++        "plugin", "fixture-owner", key, before, after
++    )
++    assert await store.get_async("plugin", "fixture-owner", key) == after
++    assert ("plugin", "fixture-owner", key) not in store._cache
++    assert not await store.compare_and_swap_async(
++        "plugin", "other-owner", key, before, after
++    )
++    assert (await database.get_preference("plugin", "fixture-owner", key)).value == {
++        "val": after
++    }
++
++
++@pytest.mark.asyncio
++async def test_response_cas_independent_engines_have_one_winner(preferences):
++    store, database = preferences
++    key = "response_style_preference:v1"
++    before = {"state": "APPROVED"}
++    await store.put_async("plugin", "fixture-owner", key, before)
++    peer = SQLiteDatabase(database.db_path)
++    await peer.initialize()
++    peer.inited = True
++    try:
++        results = await asyncio.gather(
++            database.compare_and_swap_preference(
++                "plugin",
++                "fixture-owner",
++                key,
++                {"val": before},
++                {"val": {"winner": "a"}},
++            ),
++            peer.compare_and_swap_preference(
++                "plugin",
++                "fixture-owner",
++                key,
++                {"val": before},
++                {"val": {"winner": "b"}},
++            ),
++        )
++        assert sorted(results) == [False, True]
++        committed = (await peer.get_preference("plugin", "fixture-owner", key)).value[
++            "val"
++        ]
++        assert await store.get_async("plugin", "fixture-owner", key) == committed
++    finally:
++        await peer.engine.dispose()
++
++
++@pytest.mark.asyncio
++async def test_response_cas_preserves_fifo_with_ordinary_writes(preferences):
++    store, _database = preferences
++    key = "response_style_preference:v1"
++    await store.put_async("plugin", "fixture-owner", key, {"version": 0})
++    # The deprecated sync writer still enters the same FIFO, without a cache overlay.
++    store.put(key, {"version": 1}, scope="plugin", scope_id="fixture-owner")
++    assert await store.compare_and_swap_async(
++        "plugin", "fixture-owner", key, {"version": 1}, {"version": 2}
++    )
++    assert await store.get_async("plugin", "fixture-owner", key) == {"version": 2}
++
++
++@pytest.mark.asyncio
++async def test_response_cas_failure_does_not_poison_cache_or_writer(
++    preferences, monkeypatch
++):
++    store, database = preferences
++    key = "response_style_preference:v1"
++    await store.put_async("plugin", "fixture-owner", key, {"version": 1})
++
++    async def fail(*_args):
++        raise OSError("injected before commit")
++
++    monkeypatch.setattr(database, "compare_and_swap_preference", fail)
++    with pytest.raises(OSError):
++        await store.compare_and_swap_async(
++            "plugin", "fixture-owner", key, {"version": 1}, {"version": 2}
++        )
++    assert await store.get_async("plugin", "fixture-owner", key) == {"version": 1}
++    await store.put_async("plugin", "fixture-owner", key, {"version": 3})
++    assert await store.get_async("plugin", "fixture-owner", key) == {"version": 3}
++
++
++@pytest.mark.asyncio
++async def test_response_cas_rejects_other_keys_and_nonfinite_json(preferences):
++    store, database = preferences
++    with pytest.raises(ValueError):
++        await store.compare_and_swap_async(
++            "plugin", "fixture-owner", "unrelated", {}, {}
++        )
++    key = "response_style_preference:v1"
++    await store.put_async("plugin", "fixture-owner", key, {})
++    with pytest.raises(ValueError):
++        await database.compare_and_swap_preference(
++            "plugin", "fixture-owner", key, {"val": {}}, {"val": {"bad": float("nan")}}
++        )
++    assert await store.get_async("plugin", "fixture-owner", key) == {}

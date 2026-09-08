@@ -1148,14 +1148,30 @@ class ProfileStorage(Component):
                     ),
                     encoding="utf-8",
                 )
-                if not await compare_and_swap(
-                    RESPONSE_PREFERENCE_KV_KEY, raw, after_payload
-                ):
+                try:
+                    committed = await compare_and_swap(
+                        RESPONSE_PREFERENCE_KV_KEY, raw, after_payload
+                    )
+                except NotImplementedError:
+                    return ResponsePreferenceRepairResult(
+                        False, "conditional_write_unavailable", plan, after_hash, backup_dir
+                    )
+                except Exception:
+                    # A commit exception cannot prove that SQLite did not commit.
+                    return ResponsePreferenceRepairResult(
+                        False, "commit_outcome_unknown", plan, after_hash, backup_dir
+                    )
+                if committed is not True:
                     return ResponsePreferenceRepairResult(
                         False, "skipped_conflict", plan, backup_dir=backup_dir
                     )
-                saved = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
-                _decode_response_preference_payload(saved)
+                try:
+                    saved = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
+                    _decode_response_preference_payload(saved)
+                except Exception:
+                    return ResponsePreferenceRepairResult(
+                        False, "committed_unverified", plan, after_hash, backup_dir
+                    )
                 if _response_preference_payload_hash(saved) != after_hash:
                     return ResponsePreferenceRepairResult(
                         False, "committed_unverified", plan, after_hash, backup_dir
@@ -1227,12 +1243,27 @@ class ProfileStorage(Component):
                 current = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
                 if _response_preference_payload_hash(current) != expected_after_payload_sha256:
                     return ResponsePreferenceRepairResult(False, "skipped_conflict")
-                if not await compare_and_swap(
-                    RESPONSE_PREFERENCE_KV_KEY, current, before
-                ):
+                try:
+                    committed = await compare_and_swap(
+                        RESPONSE_PREFERENCE_KV_KEY, current, before
+                    )
+                except NotImplementedError:
+                    return ResponsePreferenceRepairResult(
+                        False, "conditional_write_unavailable", backup_dir=backup_dir
+                    )
+                except Exception:
+                    return ResponsePreferenceRepairResult(
+                        False, "commit_outcome_unknown", backup_dir=backup_dir
+                    )
+                if committed is not True:
                     return ResponsePreferenceRepairResult(False, "skipped_conflict")
-                restored = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
-                _decode_response_preference_payload(restored)
+                try:
+                    restored = await self._storage.get_kv_data(RESPONSE_PREFERENCE_KV_KEY, None)
+                    _decode_response_preference_payload(restored)
+                except Exception:
+                    return ResponsePreferenceRepairResult(
+                        False, "committed_unverified", backup_dir=backup_dir
+                    )
                 if _response_preference_payload_hash(restored) != _response_preference_payload_hash(before):
                     return ResponsePreferenceRepairResult(
                         False, "committed_unverified", backup_dir=backup_dir

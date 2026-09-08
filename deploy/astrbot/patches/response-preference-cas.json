@@ -1,0 +1,34 @@
+{
+  "base_commit": "7b003fb5bf0cffd124a8c967900f7c5316ceb582",
+  "source_repository": "https://github.com/AstrBotDevs/AstrBot.git",
+  "deployed": false,
+  "tests_executed": false,
+  "patch_sha256": "a95028ef6bc8274613809da31623678d6c955cde0e1ca495bdfaa2ffa0fb41ed",
+  "files": [
+    {
+      "path": "astrbot/core/db/__init__.py",
+      "before_sha256": "7ae51ed1cf11149babf2774a51dc5a3bb49f535a0257c2a481d1dbdb458b93be",
+      "after_sha256": "8cfb8a90dcbc233f8889c56203dad038c88d292e9659c77b93606e7a2c5531a3"
+    },
+    {
+      "path": "astrbot/core/db/sqlite.py",
+      "before_sha256": "1a7fb5f0a6c64a09b856f01fd203af1c07c982f709d40d47d087f0d6462958e9",
+      "after_sha256": "d5e2f97159e4893039e8a83390ee31b2ac8153e4cb281c6ca85bf097ee815ec7"
+    },
+    {
+      "path": "astrbot/core/utils/shared_preferences.py",
+      "before_sha256": "d0701d7986990eaf6ec7e17b1bc8edbb956404449800738a662bdec7a9a08330",
+      "after_sha256": "389c6eb75e4299581e91744052482dd9e7da452e26d08c6ff8ef5f6bf397c85d"
+    },
+    {
+      "path": "astrbot/core/utils/plugin_kv_store.py",
+      "before_sha256": "2ff5c6bb1d4ad9addf4b1aae9138355cdd29abb028b1935e5cfa579409397961",
+      "after_sha256": "c98725852a0e23f757dbf5af722c0dc3a3006c95733848619033b2569ae5e38f"
+    },
+    {
+      "path": "tests/unit/test_shared_preferences.py",
+      "before_sha256": "91898e9afd38c3956691ed685f3582ae6a33d996336355b50c85324816d5cefa",
+      "after_sha256": "c1830903d3e19215fd87fbc7524940df3761cb7d0698b1dd4a1bd83113cfc9b1"
+    }
+  ]
+}

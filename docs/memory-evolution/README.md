@@ -83,3 +83,8 @@ Iris 异步初始化完成，容器运行且 WebUI HTTP 200。FAISS 的 AVX2 变
 R04 现在从“源码接线、未部署”推进到“生产代码已加载”。新反馈可沿 capture/archive 进入无正文日志与人工管理路径；没有将旧 archive 推断成历史反馈。运行过程中新增合法观察可能正常写入自身日志，但没有执行历史维护、修改配置或自动批准。按用户要求未运行测试套件、真实消息样例或主动故障演练，因此管理员命令实测、跨重启精确链重放、并发恢复和 Provider 效果仍未验证。
 
 本节覆盖前文“R04 尚未部署”的历史状态。R02/CAS、真实历史单条授权、Host 自动撤销事件及 R07/R08/R10/R11 的冻结边界不因部署改变。
+
+
+## R02 后端 CAS 开发补充
+
+已在 AstrBot 源码中实现 BaseDatabase 可选接口、SQLite BEGIN IMMEDIATE 条件事务、SharedPreferences FIFO CAS 和 PluginKVStoreMixin 接口。限定 response_style_preference:v1；禁止预写缓存、缺记录不创建、冲突返回 False、成功在 commit 后返回。独立连接竞争、队列顺序、缓存读回及故障用例已补，按既有要求未执行。生产尚未安装，历史维护仍关闭。可应用源码补丁、基线哈希和限制见 [CAS 开发说明](../../deploy/astrbot/patches/response-preference-cas.md)。
