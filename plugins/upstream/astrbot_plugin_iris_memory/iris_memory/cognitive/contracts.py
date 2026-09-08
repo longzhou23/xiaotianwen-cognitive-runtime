@@ -485,6 +485,7 @@ class LegacyProactiveSignals:
     skip_signal: bool = False
     topic_drift_signal: bool = False
     post_evaluation_signal: bool = False
+    suppress_uninvited_group: bool = False
 
     def __post_init__(self) -> None:
         if self.consecutive_reply_penalty < 0:
@@ -646,6 +647,41 @@ class BehaviorTrace:
         if not self.trace_id or not self.event_id:
             raise CognitiveContractError("trace_id and event_id are required")
         object.__setattr__(self, "identity", _freeze_mapping(self.identity))
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowStrategyProposal:
+    """Non-executable comparison for a future tool or participation preference.
+
+    This is deliberately a diagnostic contract rather than a policy store.  It
+    can show what an allowed preference would have proposed for this exact
+    scope, but it cannot authorize a tool, send a message, or change the
+    existing trigger/participation result.
+    """
+
+    kind: str
+    scope_id: str
+    subject_scope: str
+    original_decision: str
+    proposed_decision: str
+    basis: tuple[str, ...]
+    candidate: str | None = None
+    applied: bool = False
+    executed: bool = False
+    permission_effect: str = "unchanged"
+
+    def __post_init__(self) -> None:
+        for name in ("kind", "scope_id", "subject_scope", "original_decision", "proposed_decision"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise CognitiveContractError(f"shadow proposal {name} is required")
+        object.__setattr__(self, "basis", canonical_tuple(self.basis))
+        if not self.basis:
+            raise CognitiveContractError("shadow proposal basis is required")
+        if self.applied or self.executed:
+            raise CognitiveContractError("shadow proposal cannot be applied or executed")
+        if not isinstance(self.permission_effect, str) or not self.permission_effect.strip():
+            raise CognitiveContractError("shadow proposal permission effect is required")
 
 
 @dataclass(frozen=True, slots=True)

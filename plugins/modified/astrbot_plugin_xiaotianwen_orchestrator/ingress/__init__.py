@@ -6,7 +6,12 @@ from .debounce import (
     ShadowTurnSnapshot,
     TurnState,
 )
-from .deduplicate import EventDeduplicator, event_fingerprint, event_to_envelope
+from .deduplicate import (
+    EventDeduplicator,
+    conversation_key_from_event,
+    event_fingerprint,
+    event_to_envelope,
+)
 from .ownership import (
     CanaryPolicy,
     OrchestratorMode,
@@ -15,8 +20,8 @@ from .ownership import (
 )
 
 __all__ = [
-    "EventDeduplicator",
     "CanaryPolicy",
+    "EventDeduplicator",
     "OrchestratorMode",
     "OwnershipDecision",
     "PrimaryReplyOwnership",
@@ -24,6 +29,7 @@ __all__ = [
     "ShadowTurnCoordinator",
     "ShadowTurnSnapshot",
     "TurnState",
+    "conversation_key_from_event",
     "event_fingerprint",
     "event_to_envelope",
 ]

@@ -937,7 +937,7 @@ _P1_SNAPSHOT_TYPE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "iris_memory.cognitive.contracts.IdentityConfig": frozenset({"self_entity", "self_aliases"}),
     "iris_memory.cognitive.contracts.Intent": frozenset({"action", "target_entity", "reason", "basis", "confidence", "exit_reason", "domain"}),
     "iris_memory.cognitive.contracts.IrisPreprocessResult": frozenset({"experience", "metadata"}),
-    "iris_memory.cognitive.contracts.LegacyProactiveSignals": frozenset({"activation_signal", "willingness", "threshold", "cooldown", "consecutive_reply_penalty", "skip_signal", "topic_drift_signal", "post_evaluation_signal"}),
+    "iris_memory.cognitive.contracts.LegacyProactiveSignals": frozenset({"activation_signal", "willingness", "threshold", "cooldown", "consecutive_reply_penalty", "skip_signal", "topic_drift_signal", "post_evaluation_signal", "suppress_uninvited_group"}),
     "iris_memory.cognitive.contracts.ParticipationResult": frozenset({"decision", "reason", "exit_reason"}),
     "iris_memory.cognitive.contracts.RealizerRequest": frozenset({"intent", "grounding", "situation", "allowed_claims", "blocked_claims"}),
     "iris_memory.cognitive.contracts.ResolvedEvent": frozenset({"event_id", "source", "occurred_at", "session_id", "mode", "content", "actor", "mentioned_entities", "reply_to", "raw_metadata"}),

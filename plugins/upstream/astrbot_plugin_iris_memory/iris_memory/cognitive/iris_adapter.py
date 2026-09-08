@@ -243,6 +243,19 @@ class IrisPostAdapter:
             provenance=("raw_iris_memory", "iris_post_adapter"),
         )
 
+    @staticmethod
+    def _context_prefix(perspective: Perspective) -> str:
+        """Make stored subject provenance visible without rewriting memory text."""
+        prefixes = {
+            Perspective.AUTOBIOGRAPHICAL: "[你的经历] ",
+            Perspective.INTERPERSONAL: "[他人经历] ",
+            Perspective.SHARED_GROUP: "[共同经历] ",
+            Perspective.WORLD_FACT: "[已知事实] ",
+            Perspective.HEARSAY: "[转述信息] ",
+            Perspective.UNRESOLVED: "[来源未确认] ",
+        }
+        return prefixes[perspective]
+
     def format_l2_context(self, results: Iterable["MemorySearchResult"]) -> str:
         views = [
             self.project_memory(
@@ -256,8 +269,7 @@ class IrisPostAdapter:
             return ""
         lines = ["## 相关记忆"]
         for index, view in enumerate(views, 1):
-            prefix = "[你的经历] " if view.perspective is Perspective.AUTOBIOGRAPHICAL else ""
-            lines.append(f"{index}. {prefix}{view.content}")
+            lines.append(f"{index}. {self._context_prefix(view.perspective)}{view.content}")
         return "\n".join(lines)
 
 
@@ -315,10 +327,10 @@ class CognitiveRuntime:
     ) -> BehaviorLoopResult:
         # Snapshot at method entry: no later code may read live global mode.
         trace_mode = runtime_mode if runtime_mode is not None else self.runtime_mode
-        lite = self.behavior.observe(experience)
         self._experiences[experience.event.event_id] = experience
         self._trim_experiences()
         result = self.behavior.run(experience, legacy_signals)
+        lite = result.trace.situation_lite
         resolved = []
         if experience.event.actor:
             resolved.append(experience.event.actor.entity_id)

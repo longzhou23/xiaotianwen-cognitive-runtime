@@ -25,6 +25,7 @@ from iris_memory.cognitive.contracts import (
     ParticipationDecision,
     SocialAction,
     IntentDomain,
+    TriggerSnapshot,
 )
 from iris_memory.cognitive.legacy_proactive import LegacyIrisProactiveSignalAdapter
 from iris_memory.cognitive.situation import SituationBuilder
@@ -112,6 +113,27 @@ def test_situation_same_scope_concurrent_updates_are_atomic_and_recency_is_not_p
     assert after_action.self_recently_spoke is None
 
 
+def test_runtime_observes_each_experience_once_and_carries_the_lite_view(monkeypatch):
+    runtime = CognitiveRuntime()
+    calls = 0
+    original_observe = runtime.behavior.observe
+
+    def observe_once(experience):
+        nonlocal calls
+        calls += 1
+        return original_observe(experience)
+
+    monkeypatch.setattr(runtime.behavior, "observe", observe_once)
+
+    result = runtime.run_behavior(
+        _experience("今晚几点观测？", event_id="qq:observe-once"),
+        runtime_mode=runtime.runtime_mode,
+    )
+
+    assert calls == 1
+    assert result.trace.situation_lite is not None
+
+
 def test_legacy_adapter_is_read_only_and_maps_each_frozen_signal():
     data = SimpleNamespace(
         state=SimpleNamespace(value="cooldown"),
@@ -119,6 +141,7 @@ def test_legacy_adapter_is_read_only_and_maps_each_frozen_signal():
         msg_count=7,
         backoff_level=2,
         consecutive_replies=3,
+        no_uninvited_group_interjection=True,
     )
     state = SimpleNamespace(_groups={"g1": data})
 
@@ -143,6 +166,7 @@ def test_legacy_adapter_is_read_only_and_maps_each_frozen_signal():
     assert dict(signals.threshold) == {"message_count": 7, "backoff_level": 2}
     assert signals.cooldown and signals.skip_signal and signals.topic_drift_signal
     assert signals.post_evaluation_signal and signals.consecutive_reply_penalty == 3
+    assert signals.suppress_uninvited_group is True
     assert state._groups["g1"] is data
 
 
@@ -190,6 +214,83 @@ def test_legacy_threshold_only_modifies_trigger_score_not_explicit_self_activati
     assert decision.should_start_loop
     assert decision.score == 1
     assert "threshold backoff modifier=2" in decision.reason
+
+
+def test_frozen_group_participation_policy_keeps_direct_requests_and_follow_up():
+    runtime = CognitiveBehaviorRuntime(self_entity="agent:xiaotianwen")
+
+    ordinary = _experience(
+        "普通群聊",
+        mode="casual_group_chat",
+        event_id="qq:policy-ordinary",
+    )
+    ordinary_lite = runtime.observe(ordinary)
+    suppressed = runtime.trigger.evaluate_snapshot(
+        TriggerSnapshot(
+            {},
+            ordinary,
+            ordinary_lite,
+            LegacyProactiveSignals(
+                activation_signal="chime_in",
+                suppress_uninvited_group=True,
+            ),
+        )
+    )
+    assert suppressed.should_start_loop is False
+    assert suppressed.exit_reason is ExitReason.TRIGGER_NO
+    assert "suppresses uninvited" in suppressed.reason
+
+    follow_up = _experience(
+        "接着刚才的话题",
+        mode="casual_group_chat",
+        event_id="qq:policy-follow-up",
+    )
+    follow_up_lite = runtime.observe(follow_up)
+    invited = runtime.trigger.evaluate_snapshot(
+        TriggerSnapshot(
+            {},
+            follow_up,
+            follow_up_lite,
+            LegacyProactiveSignals(
+                activation_signal="follow_up",
+                suppress_uninvited_group=True,
+            ),
+        )
+    )
+    assert invited.should_start_loop is True
+
+    mentioned = _experience(
+        "请回答",
+        mode="casual_group_chat",
+        event_id="qq:policy-mention",
+        mentioned=(_SELF,),
+    )
+    mentioned_lite = runtime.observe(mentioned)
+    direct = runtime.trigger.evaluate_snapshot(
+        TriggerSnapshot(
+            {},
+            mentioned,
+            mentioned_lite,
+            LegacyProactiveSignals(suppress_uninvited_group=True),
+        )
+    )
+    assert direct.should_start_loop is True
+
+    private = _experience(
+        "私聊请求",
+        mode="private",
+        event_id="qq:policy-private",
+    )
+    private_lite = runtime.observe(private)
+    private_result = runtime.trigger.evaluate_snapshot(
+        TriggerSnapshot(
+            {},
+            private,
+            private_lite,
+            LegacyProactiveSignals(suppress_uninvited_group=True),
+        )
+    )
+    assert private_result.should_start_loop is True
 
 
 @pytest.mark.parametrize(

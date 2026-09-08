@@ -161,3 +161,17 @@ def test_shadow_diff_is_content_redacted_and_adapters_do_not_call_models() -> No
     rendered = json.dumps(diff.to_dict(), ensure_ascii=False)
     assert "旧路径秘密内容" not in rendered
     assert "当前场景秘密内容" not in rendered
+
+
+def test_conversation_history_is_the_single_short_history_owner() -> None:
+    result = ContextAssembler().assemble(
+        (
+            _section("conversation_history", 30, "[最近对话]\n甲: 你好"),
+            _section("short_history", 30, "旧历史不应重复"),
+            _section("context_aware", 40, "旧场景不应再注入"),
+        )
+    )
+
+    assert [section.source for section in result.sections] == ["conversation_history"]
+    assert ("short_history", "duplicate_history_owner") in result.dropped
+    assert ("context_aware", "retired_history_owner") in result.dropped

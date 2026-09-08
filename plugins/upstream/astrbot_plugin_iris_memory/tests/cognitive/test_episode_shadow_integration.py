@@ -10,7 +10,7 @@ from iris_memory.cognitive.contracts import (
     Perspective,
     ResolvedEvent,
 )
-from iris_memory.cognitive.episode import EpisodeEventKind
+from iris_memory.cognitive.episode import EpisodeEventKind, EpisodeState
 from iris_memory.cognitive.episode_shadow import EpisodeShadowObserver
 from iris_memory.cognitive.episode_store import InMemoryEpisodeStore
 from iris_memory.cognitive.iris_adapter import CognitiveRuntime
@@ -62,6 +62,24 @@ def test_shadow_observer_records_proposal_host_dispatch_refs():
     after_dispatch = store.get_episode(ep.episode_id)
     assert after_dispatch is not None
     assert EpisodeEventKind.DISPATCH in {r.kind for r in after_dispatch.event_refs}
+
+
+def test_late_host_and_dispatch_callbacks_do_not_mutate_finalized_episode(caplog):
+    store = InMemoryEpisodeStore()
+    observer = EpisodeShadowObserver(store)
+    runtime = CognitiveRuntime(episode_observer=observer)
+    proposal = runtime.run_behavior(_exp("qq:late", "虚构问题"))
+    episode = store.all_episodes()[0]
+    store.transition_state(episode.episode_id, EpisodeState.SOFT_CLOSED, reason="idle")
+    frozen = store.transition_state(
+        episode.episode_id, EpisodeState.FINALIZED, reason="grace"
+    )
+
+    host = runtime.observe_host_output(proposal, "虚构回复", legacy_fallthrough=True)
+    runtime.observe_dispatch(host)
+
+    assert store.get_episode(episode.episode_id) == frozen
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
 
 
 def test_ambient_group_message_does_not_create_episode():

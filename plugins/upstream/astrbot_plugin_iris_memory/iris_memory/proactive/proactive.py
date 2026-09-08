@@ -129,6 +129,8 @@ class ProactiveEngine:
             await self._check_pending_timeout(group_id)
             if self._is_busy(group_id) or group_id in self._initiating:
                 continue
+            if self._state.get_no_uninvited_interjection(group_id):
+                continue
             if self._skip_retry_after.get(group_id, 0) > time.time():
                 continue
             if not self._state.can_detect(group_id):
@@ -159,6 +161,8 @@ class ProactiveEngine:
             return "该群有回复进行中，稍后再试"
         if not force and not self._state.is_whitelisted(group_id):
             return "该群未启用"
+        if not force and self._state.get_no_uninvited_interjection(group_id):
+            return "该群已禁止无邀请插话"
 
         umo = self._umo_get(group_id)
         if not umo:
@@ -272,6 +276,10 @@ class ProactiveEngine:
                         "Iris Reply: text_transform error for group %s: %s",
                         group_id, e,
                     )
+            # Re-read the policy at the direct-send boundary. An administrator
+            # may have enabled it while the decision or speech provider awaited.
+            if not force and self._state.get_no_uninvited_interjection(group_id):
+                return "该群已禁止无邀请插话"
             chain = MessageChain().message(text)
             ok = await self._context.send_message(umo, chain)
             if not ok:

@@ -46,12 +46,16 @@ from iris_memory.cognitive.reply_link_authority import (
     P2rReplyLinkFactArchiveV1,
     PlatformMessageIdentityV1,
 )
-from iris_memory.cognitive.review import ReviewRun, ReviewStatus
+from iris_memory.cognitive.review import EvidenceSourceType, ReviewRun, ReviewStatus
 from iris_memory.cognitive.review_service import (
     ReviewInputSnapshot,
     compute_input_snapshot_hash,
 )
 from iris_memory.cognitive.review_store import AppendOnlyReviewStore
+from iris_memory.cognitive.response_preference_feedback import (
+    ResponseLengthFeedbackReviewObserverV1,
+)
+from iris_memory.profile.response_preferences import ResponsePreferenceScope
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -216,6 +220,31 @@ def test_production_completion_commits_run_then_archive(tmp_path):
     assert len(p2r0.archives) == 1
 
 
+def test_l09_observer_is_notified_after_review_archive_commit(tmp_path):
+    service, _, p2r0, run, snapshot, _, inbound, _ = _fixture(tmp_path)
+    observer = ResponseLengthFeedbackReviewObserverV1()
+    scope = ResponsePreferenceScope("napcat", "user", "group", "group")
+    assert observer.observe_inbound(
+        text="这段太长",
+        scope=scope,
+        occurred_at=NOW,
+        inbound_fact=inbound,
+    ) == "pending_archive"
+
+    service = P2r0HistoricalArchiveService(
+        service.p2_store,
+        p2r0,
+        feedback_observer=observer,
+    )
+    archive = service.archive_review_run(run, snapshot)
+
+    assert archive is not None
+    assert len(observer.observations) == 1
+    aggregate = observer.aggregates(now=NOW)[0]
+    assert aggregate.distinct_feedback_count == 1
+    assert aggregate.eligible is False
+
+
 def test_production_completion_retry_is_idempotent(tmp_path):
     service, _, p2r0, _, snapshot, *_ = _fixture(tmp_path)
     coordinator = ProductionReviewCompletionCoordinator(
@@ -225,6 +254,32 @@ def test_production_completion_retry_is_idempotent(tmp_path):
     second = coordinator.complete_episode(snapshot.episode, ())
     assert first is not None and second is not None
     assert first.review_run_id == second.review_run_id
+    assert len(p2r0.archives) == 1
+
+
+def test_completion_satisfied_replays_the_same_fact_snapshot_only(tmp_path):
+    service, p2, p2r0, _, snapshot, _, _, record = _fixture(tmp_path)
+    fact_envelopes = {
+        (EvidenceSourceType.HOST_RESULT, snapshot.episode.event_refs[0].ref_id): record,
+    }
+    coordinator = ProductionReviewCompletionCoordinator(
+        service,
+        AppendOnlyReviewStore(tmp_path / "reviews-with-facts.jsonl"),
+    )
+
+    completed = coordinator.complete_episode(
+        snapshot.episode,
+        (),
+        fact_envelopes=fact_envelopes,
+    )
+    assert completed is not None
+    assert coordinator.completion_satisfied(
+        snapshot.episode,
+        (),
+        fact_envelopes=fact_envelopes,
+    )
+    assert not coordinator.completion_satisfied(snapshot.episode, ())
+    assert len(p2._run_commits) == 1
     assert len(p2r0.archives) == 1
 
 

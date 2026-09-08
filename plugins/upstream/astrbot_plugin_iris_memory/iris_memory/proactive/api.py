@@ -21,6 +21,7 @@ def group_state_summary(state: StateManager, group_id: str) -> dict:
     return {
         "state": data.state.value,
         "willingness": data.willingness,
+        "no_uninvited_group_interjection": data.no_uninvited_group_interjection,
         "msg_count": data.msg_count,
         "effective_n": effective_n,
         "effective_t": effective_t,

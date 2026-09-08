@@ -58,6 +58,11 @@ def _prepare_legacy_env(tmp_path, star):
 
 
 class TestFullFlow:
+    def test_startup_does_not_implicitly_write_historical_data(self):
+        import main
+
+        assert main.LEGACY_MIGRATION_ENABLED is False
+
     @pytest.mark.asyncio
     async def test_full_migration(
         self, tmp_path, star, component_manager, monkeypatch

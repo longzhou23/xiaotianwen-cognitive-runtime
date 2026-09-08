@@ -165,6 +165,38 @@ def test_host_capture_one_eligible_operation_and_replay(tmp_path, fake_h0):
     assert len(reopened.host_output_facts) == 1
 
 
+def test_host_capture_accepts_real_astrbot_h0_receipt(tmp_path):
+    """Exercise the capture boundary with AstrBot's installed H0 contract."""
+    receipt_module = pytest.importorskip("astrbot.core.platform.send_receipt")
+    service, current = _service(tmp_path)
+    operation = receipt_module.PlatformSendReceiptV1(
+        schema_version=receipt_module.PLATFORM_SEND_RECEIPT_SCHEMA_V1,
+        platform_id="napcat-instance-1",
+        account_id="bot-1",
+        conversation_id="group-1",
+        operation_index=0,
+        operation_kind=receipt_module.PlatformSendOperationKindV1.MESSAGE,
+        status=(
+            receipt_module.PlatformSendOperationStatusV1.SEND_SUCCEEDED_WITH_IDENTITY
+        ),
+        platform_message_id="host-message-1",
+    )
+    result = receipt_module.HostSendResultV1(
+        schema_version=receipt_module.HOST_SEND_RESULT_SCHEMA_V1,
+        aggregate_status=(
+            receipt_module.HostSendAggregateStatusV1.SEND_SUCCEEDED_WITH_IDENTITY
+        ),
+        operations=(operation,),
+    )
+
+    captured = service.capture_host_send_result(_Event(current), result)
+
+    assert captured.host_facts == 1
+    assert service.store.host_output_facts[0].platform_message_identity.message_id == (
+        "host-message-1"
+    )
+
+
 @pytest.mark.parametrize("kind,status", [
     ("FORWARD_MESSAGE", "SEND_SUCCEEDED_WITH_IDENTITY"),
     ("OTHER", "SEND_SUCCEEDED_WITH_IDENTITY"),
@@ -351,6 +383,35 @@ def test_inbound_capture_deduplicates_same_reply_and_rejects_ambiguity(tmp_path,
     ambiguous = service.capture_inbound(_Event(current, messages=[_Reply(42), _Reply(43)], message_id="in-2"))
     assert ambiguous.ambiguous_reply is True
     assert len(service.store.inbound_reply_facts) == 1
+
+
+class _FeedbackObserverSpy:
+    def __init__(self):
+        self.store = None
+        self.calls = []
+
+    def bind_archive_store(self, store):
+        self.store = store
+
+    def observe_inbound_event(self, event, inbound_fact):
+        self.calls.append((event, inbound_fact))
+
+
+def test_l09_feedback_observer_reuses_committed_inbound_capture_hook(tmp_path, fake_h0):
+    service, current = _service(tmp_path)
+    feedback = _FeedbackObserverSpy()
+    capture = capture_module.P2r0CaptureService(
+        service.store,
+        service._runtime,
+        feedback_observer=feedback,
+    )
+
+    result = capture.capture_inbound(_Event(current, messages=[_Reply(42)]))
+
+    assert result.inbound_facts == 1
+    assert feedback.store is service.store
+    assert len(feedback.calls) == 1
+    assert feedback.calls[0][1] == service.store.inbound_reply_facts[0]
 
 
 def test_inbound_capture_without_reply_is_empty(tmp_path, fake_h0):

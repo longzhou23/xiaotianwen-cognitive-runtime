@@ -35,6 +35,28 @@ class TestCooldown:
         assert state.get_state(GID).state == GroupState.IDLE
 
 
+class TestGroupInterjectionPolicy:
+    def test_policy_defaults_off_and_survives_state_round_trip(self, state):
+        assert state.get_no_uninvited_interjection(GID) is False
+        state.set_no_uninvited_interjection(GID, True)
+        assert state.get_no_uninvited_interjection(GID) is True
+
+        snapshot = state._serialize_group(state.get_state(GID))
+        restored = state._deserialize_group(snapshot)
+        assert restored.no_uninvited_group_interjection is True
+
+    def test_admin_policy_accepts_only_explicit_switch(self, state):
+        from iris_memory.proactive.admin import AdminCommands
+
+        admin = AdminCommands(state)
+        assert "开启" in admin.set_no_uninvited_interjection(GID, "on")
+        assert admin.get_no_uninvited_interjection(GID) is True
+        assert "无效" in admin.set_no_uninvited_interjection(GID, "maybe")
+        assert admin.get_no_uninvited_interjection(GID) is True
+        assert "关闭" in admin.set_no_uninvited_interjection(GID, "off")
+        assert admin.get_no_uninvited_interjection(GID) is False
+
+
 class TestBackoff:
     def test_escalation_raises_thresholds(self, nm_config):
         # medium 意愿：n = int(10 * 1.3^level * 0.85)，t = int(30 * 1.3^level * 0.85)

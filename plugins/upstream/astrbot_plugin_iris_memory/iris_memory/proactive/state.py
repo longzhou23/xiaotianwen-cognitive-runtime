@@ -74,6 +74,7 @@ class GroupStateData:
     last_backoff_time: float = 0.0
     consecutive_replies: int = 0
     willingness: str = DEFAULT_LEVEL
+    no_uninvited_group_interjection: bool = False
     boost_initial: float = 1.0
     boost_set_at: float = 0.0
     boost_until: float = 0.0
@@ -597,7 +598,10 @@ class StateManager:
 
     # ---- 持久化 ----
 
-    async def save_dirty(self, save_fn) -> None:
+    async def save_dirty(self, save_fn) -> set[str]:
+        """Persist dirty state and return KV keys that could not be written."""
+
+        failed_keys: set[str] = set()
         async with self._global_lock:
             if self._whitelist_dirty:
                 self._whitelist_dirty = False
@@ -605,6 +609,7 @@ class StateManager:
                     await save_fn("iris_reply:whitelist", list(self._whitelist))
                 except Exception as e:
                     self._whitelist_dirty = True
+                    failed_keys.add("iris_reply:whitelist")
                     logger.warning("Iris Reply: whitelist KV save failed: %s", e)
             if self._group_ids_dirty:
                 self._group_ids_dirty = False
@@ -612,6 +617,7 @@ class StateManager:
                     await save_fn(self._GROUP_IDS_KEY, list(self._groups.keys()))
                 except Exception as e:
                     self._group_ids_dirty = True
+                    failed_keys.add(self._GROUP_IDS_KEY)
                     logger.warning("Iris Reply: group manifest KV save failed: %s", e)
             dirty_snapshot = list(self._dirty_groups)
             self._dirty_groups.clear()
@@ -629,13 +635,25 @@ class StateManager:
                 except Exception as e:
                     data.dirty = True
                     self._dirty_groups.add(gid)
+                    failed_keys.add(f"{self._GROUP_KEY_PREFIX}{gid}")
                     logger.warning("Iris Reply: KV save failed for group %s: %s", gid, e)
+        return failed_keys
 
     def get_willingness(self, group_id: str) -> str:
         data = self._ensure_group(group_id)
         if data.willingness not in VALID_LEVELS:
             data.willingness = DEFAULT_LEVEL
         return data.willingness
+
+    def get_no_uninvited_interjection(self, group_id: str) -> bool:
+        """Read the group-only participation policy owned by this state manager."""
+
+        return bool(self._ensure_group(group_id).no_uninvited_group_interjection)
+
+    def set_no_uninvited_interjection(self, group_id: str, enabled: bool) -> None:
+        data = self._ensure_group(group_id)
+        data.no_uninvited_group_interjection = bool(enabled)
+        self._mark_dirty(group_id, data)
 
     def set_willingness(self, group_id: str, level: str) -> None:
         if level not in VALID_LEVELS:
@@ -716,6 +734,7 @@ class StateManager:
             "last_backoff_time": data.last_backoff_time,
             "consecutive_replies": data.consecutive_replies,
             "willingness": data.willingness,
+            "no_uninvited_group_interjection": data.no_uninvited_group_interjection,
             "boost_initial": data.boost_initial,
             "boost_set_at": data.boost_set_at,
             "boost_until": data.boost_until,
@@ -775,6 +794,9 @@ class StateManager:
             last_backoff_time=last_backoff_time,
             consecutive_replies=d.get("consecutive_replies", 0),
             willingness=willingness,
+            no_uninvited_group_interjection=bool(
+                d.get("no_uninvited_group_interjection", False)
+            ),
             boost_initial=d.get("boost_initial", 1.0),
             boost_set_at=d.get("boost_set_at", 0.0),
             boost_until=d.get("boost_until", 0.0),
@@ -801,6 +823,7 @@ class StateManager:
             f"群 {group_id} 状态:",
             f"  状态机: {data.state.value}",
             f"  回复意愿: {display_level(data.willingness)}",
+            f"  禁止无邀请插话: {'是' if data.no_uninvited_group_interjection else '否'}",
             f"  消息计数: {data.msg_count}/{effective_n}",
             f"  退避等级: {data.backoff_level} (×{backoff_factor:.2f})",
             f"  频率提升: ×{current_boost:.2f}" + (f" (初始×{data.boost_initial:.2f})" if current_boost < 1.0 else ""),

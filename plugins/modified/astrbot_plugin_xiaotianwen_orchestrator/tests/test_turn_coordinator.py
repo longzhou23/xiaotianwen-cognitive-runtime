@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from astrbot_plugin_xiaotianwen_orchestrator.compatibility import (
     StructuralObservationStore,
     compare_shadow_turn,
@@ -45,7 +44,7 @@ def _event(
 def test_event_normalization_keeps_image_and_text_in_one_turn() -> None:
     turn = event_to_envelope(_event("m-1", "看看这个", image_id="img-a"), received_at=10)
 
-    assert turn.session_id == "group:42"
+    assert turn.session_id == "conversation:onebot:onebot:group:42"
     assert turn.text == "看看这个"
     assert len(turn.media) == 1
     assert turn.media[0].media_id == "img-a"
@@ -99,6 +98,21 @@ def test_three_second_quiet_window_merges_trailing_text_and_deduplicates_event()
     assert coordinator.active_timer_count == 0
 
 
+def test_cross_sender_messages_remain_separate_turns_in_one_conversation() -> None:
+    coordinator = ShadowTurnCoordinator(quiet_window_seconds=3)
+
+    first = coordinator.ingest_event(_event("m-a", "甲的消息", sender_id="alice"), now=0)
+    second = coordinator.ingest_event(_event("m-b", "乙的消息", sender_id="bob"), now=1)
+
+    assert first.action == "created"
+    assert second.action == "created"
+    assert second.request_id != first.request_id
+    assert second.snapshot is not None
+    assert second.snapshot.turn.session_id == first.snapshot.turn.session_id
+    assert coordinator.terminal_turns[-1].state is TurnState.CANCELLED
+    assert coordinator.terminal_turns[-1].turn.sender_id == "alice"
+
+
 def test_missing_platform_message_id_uses_stable_fallback_fingerprint() -> None:
     coordinator = ShadowTurnCoordinator()
     event = _event("placeholder", "没有 message id 的事件")
@@ -135,7 +149,7 @@ def test_legacy_comparison_is_structural_and_never_contains_message_body() -> No
     diff = compare_shadow_turn(
         result.snapshot,
         {
-            "session_id": "group:42",
+            "session_id": "conversation:onebot:onebot:group:42",
             "message_ids": ["m-secret"],
             "creates_primary_reply": True,
         },

@@ -1,0 +1,229 @@
+"""Administrator commands for the bounded response-expression experiment."""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING
+
+from iris_memory.core import get_component_manager, get_logger
+from iris_memory.profile.response_preferences import (
+    APPROVED,
+    PENDING,
+    REVOKED,
+    SUPERSEDED,
+    SUSPENDED,
+    ResponsePreferenceRecord,
+)
+from iris_memory.profile.storage import ProfileStorage
+
+from .base import CommandHandler, CommandResult, ParsedArgs
+
+if TYPE_CHECKING:
+    from astrbot.api.event import AstrMessageEvent
+
+
+logger = get_logger("commands.response_preference")
+
+_STATUS_LABELS = {
+    PENDING: "待人工核实",
+    APPROVED: "已批准",
+    REVOKED: "已撤销",
+    SUSPENDED: "因冲突暂停",
+    SUPERSEDED: "已有同值偏好，未延期",
+    "EXPIRED": "已过期",
+}
+
+
+def _actor_id(event: AstrMessageEvent) -> str:
+    for method_name in ("get_sender_id", "get_self_id"):
+        method = getattr(event, method_name, None)
+        if callable(method):
+            try:
+                value = method()
+            except Exception:  # noqa: BLE001 - event accessors are a fail-closed boundary
+                value = None
+            if type(value) in (str, int) and str(value).strip():
+                return str(value).strip()
+    # The command itself is protected by AstrBot's ADMIN decorator.  The
+    # fallback is only a label; it is never used as an authorization check.
+    return "maintainer-command"
+
+
+def _candidate_arg(args: ParsedArgs) -> str:
+    # ParsedArgs.raw_args retains [sub_command, ...] after CommandParser.parse.
+    return args.raw_args[1].strip() if len(args.raw_args) > 1 else ""
+
+
+def _render_record(record: ResponsePreferenceRecord, now: float) -> str:
+    scope = record.scope
+    source = record.source
+    status = record.display_status(now)
+    expiry = "—" if record.expires_at is None else str(int(record.expires_at))
+    if status == "EXPIRED":
+        reason = "reason=approval_ttl_elapsed"
+    elif status == SUSPENDED:
+        reason = f"reason={record.suspended_reason}"
+    elif status == SUPERSEDED:
+        reason = "reason=active_same_value"
+    elif status == REVOKED:
+        reason = f"reason=revoked_by:{record.revoked_by}"
+    else:
+        reason = "reason=awaiting_manual_approval" if status == PENDING else "reason=approved_by_manual_review"
+    return (
+        f"{record.candidate_id} | {_STATUS_LABELS.get(status, status)} | "
+        f"{record.parameter}={record.value} | platform={scope.platform_id} account={scope.account_id} "
+        f"user={scope.user_id} conversation={scope.conversation_id} | "
+        f"source={source.source_kind}:{source.source_event_id} | expires_at={expiry} | {reason}"
+    )
+
+
+class ResponsePreferenceCommandHandler(CommandHandler):
+    """The admin-only ``iris_mem preference`` command family."""
+
+    @property
+    def name(self) -> str:
+        return "preference"
+
+    @property
+    def description(self) -> str:
+        return "受控回复/工具偏好（人工批准、7天、回复或工具参数按 scope 隔离）"
+
+    @property
+    def sub_commands(self) -> dict[str, str]:
+        return {
+            "pending": "查看待人工核实的候选",
+            "status": "查看全部候选及有效/过期/撤销状态",
+            "consolidate_length": "把已达 L09 门槛的 review-only 聚合转为待核实候选",
+            "approve <candidate_id>": "批准一个已核实来源（不自动续期）",
+            "revoke <candidate_id>": "撤销一个候选或已批准记录",
+        }
+
+    def _storage(self) -> ProfileStorage | None:
+        try:
+            manager = get_component_manager()
+        except RuntimeError:
+            return None
+        if not manager:
+            return None
+        storage = manager.get_component("profile", ProfileStorage)
+        return storage if storage and storage.is_available else None
+
+    async def handle(
+        self,
+        event: AstrMessageEvent,
+        args: ParsedArgs,
+        sub_command: str | None = None,
+    ) -> CommandResult:
+        storage = self._storage()
+        if storage is None:
+            return CommandResult(False, "回复表达偏好存储不可用（需要启用 profile）")
+
+        if sub_command in (None, "pending"):
+            return await self._list(storage, PENDING)
+        if sub_command == "status":
+            return await self._list(storage, None)
+        if sub_command == "consolidate_length":
+            return await self._consolidate_length(storage)
+        if sub_command == "approve":
+            candidate_id = _candidate_arg(args)
+            if not candidate_id:
+                return CommandResult(False, "用法: iris_mem preference approve <candidate_id>")
+            result = await storage.approve_response_preference(
+                candidate_id, _actor_id(event)
+            )
+            if result.success:
+                return CommandResult(True, f"✅ 已批准 {candidate_id}，有效 7 天且不自动续期")
+            if result.code == "active_duplicate":
+                return CommandResult(
+                    True,
+                    f"ℹ️ {candidate_id} 与当前有效值相同，已标记为已处理，未延期",
+                )
+            return CommandResult(False, self._operation_error(result.code, candidate_id))
+        if sub_command == "revoke":
+            candidate_id = _candidate_arg(args)
+            if not candidate_id:
+                return CommandResult(False, "用法: iris_mem preference revoke <candidate_id>")
+            result = await storage.revoke_response_preference(
+                candidate_id, _actor_id(event)
+            )
+            if result.success:
+                return CommandResult(True, f"✅ 已撤销 {candidate_id}，后续请求恢复默认表达")
+            return CommandResult(False, self._operation_error(result.code, candidate_id))
+        if sub_command == "help":
+            return CommandResult(True, self.get_help_text())
+        return CommandResult(False, f"未知的子指令: {sub_command}\n{self.get_help_text()}")
+
+    async def _consolidate_length(self, storage: ProfileStorage) -> CommandResult:
+        try:
+            from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
+
+            observer = getattr(
+                get_cognitive_runtime(),
+                "response_length_feedback_observer",
+                None,
+            )
+        except Exception:
+            observer = None
+        if observer is None or not callable(getattr(observer, "consolidate_eligible", None)):
+            return CommandResult(False, "❌ L09 review-only 观察器不可用，未创建候选")
+        try:
+            results = await observer.consolidate_eligible(storage)
+        except Exception as exc:  # noqa: BLE001 - command boundary fails closed
+            logger.warning("巩固 L09 回复长度聚合失败：%s", exc)
+            return CommandResult(False, "❌ L09 聚合巩固失败，未回报成功")
+        pending = [
+            result.record.candidate_id
+            for result in results
+            if getattr(result, "code", None) == "pending"
+            and getattr(result, "record", None) is not None
+        ]
+        duplicates = sum(
+            1 for result in results if getattr(result, "code", None) in {"duplicate", "active_duplicate"}
+        )
+        failures = [result for result in results if not getattr(result, "success", False)]
+        if failures:
+            return CommandResult(False, f"❌ L09 聚合巩固未完全成功（失败 {len(failures)} 条，未自动批准）")
+        if not results:
+            return CommandResult(True, "✅ 当前没有达到门槛的 L09 review-only 聚合，未创建候选")
+        if pending:
+            return CommandResult(
+                True,
+                "✅ 已创建待人工核实候选：" + ", ".join(pending) + "；请用 pending/status 查看，批准后才会影响请求",
+                {"pending": len(pending), "duplicates": duplicates},
+            )
+        return CommandResult(
+            True,
+            f"ℹ️ L09 聚合已处理（重复或已有有效候选 {duplicates} 条），未自动批准",
+            {"pending": 0, "duplicates": duplicates},
+        )
+
+    async def _list(
+        self, storage: ProfileStorage, status: str | None
+    ) -> CommandResult:
+        try:
+            records = await storage.list_response_preferences(status=status)
+        except Exception as exc:  # noqa: BLE001 - command storage must fail closed
+            logger.warning("列出回复表达偏好失败：%s", exc)
+            return CommandResult(False, "❌ 回复表达偏好存储读取失败，未执行任何操作")
+        now = time.time()
+        title = "待人工核实候选" if status == PENDING else "回复表达偏好状态"
+        lines = [
+            f"📌 {title}（仅一处私聊；批准后 7 天；不自动续期；可恢复默认）",
+        ]
+        if not records:
+            lines.append("（无记录）")
+        else:
+            lines.extend(_render_record(record, now) for record in records)
+        return CommandResult(True, "\n".join(lines), {"count": len(records)})
+
+    @staticmethod
+    def _operation_error(code: str, candidate_id: str) -> str:
+        messages = {
+            "not_found": f"❌ 未找到候选 {candidate_id}；请先用 pending/status 查看系统生成的 ID",
+            "already_processed": f"ℹ️ {candidate_id} 已处理，不能重复批准或延期",
+            "already_revoked": f"ℹ️ {candidate_id} 已撤销，不能恢复旧状态",
+            "invalid_candidate": "❌ candidate_id 必须是系统生成的 rspref:... ID",
+            "write_failed": "❌ 持久化失败，未回报操作成功；请检查存储后重试",
+            "unavailable": "❌ 回复表达偏好存储不可用",
+        }
+        return messages.get(code, f"❌ 操作失败（{code}）")

@@ -17,6 +17,7 @@ from .contracts import (
     ParticipationDecision,
     ParticipationResult,
     RealizerRequest,
+    ShadowStrategyProposal,
     SocialAction,
     OutputState,
     TriggerSnapshot,
@@ -186,20 +187,60 @@ class CognitiveBehaviorRuntime:
         )
         trigger = self.trigger.evaluate_snapshot(snapshot)
         if not trigger.should_start_loop:
-            return BehaviorLoopResult(BehaviorTrace(experience.event.event_id, trigger, None, None, None, ExitReason.TRIGGER_NO))
+            return BehaviorLoopResult(
+                BehaviorTrace(
+                    experience.event.event_id,
+                    trigger,
+                    None,
+                    None,
+                    None,
+                    ExitReason.TRIGGER_NO,
+                    situation_lite=lite,
+                )
+            )
 
         full = self.situation.build_full(experience, lite)
         participation = self.participation.decide(snapshot=snapshot)
         if participation.decision is not ParticipationDecision.PARTICIPATE:
-            return BehaviorLoopResult(BehaviorTrace(experience.event.event_id, trigger, participation, None, None, participation.exit_reason))
+            return BehaviorLoopResult(
+                BehaviorTrace(
+                    experience.event.event_id,
+                    trigger,
+                    participation,
+                    None,
+                    None,
+                    participation.exit_reason,
+                    situation_lite=lite,
+                )
+            )
 
         intent = self.intent.plan(experience)
         if intent.action is None:
-            return BehaviorLoopResult(BehaviorTrace(experience.event.event_id, trigger, participation, intent, None, ExitReason.NO_INTENT))
+            return BehaviorLoopResult(
+                BehaviorTrace(
+                    experience.event.event_id,
+                    trigger,
+                    participation,
+                    intent,
+                    None,
+                    ExitReason.NO_INTENT,
+                    situation_lite=lite,
+                )
+            )
 
         grounding = self.grounding.assess(intent)
         if grounding.status is GroundingStatus.INSUFFICIENT:
-            return BehaviorLoopResult(BehaviorTrace(experience.event.event_id, trigger, participation, intent, grounding, ExitReason.GROUNDING_FAILED))
+            return BehaviorLoopResult(
+                BehaviorTrace(
+                    experience.event.event_id,
+                    trigger,
+                    participation,
+                    intent,
+                    grounding,
+                    ExitReason.GROUNDING_FAILED,
+                    situation_lite=lite,
+                )
+            )
 
         request = RealizerRequest(intent, grounding, full, grounding.allowed_claims, grounding.blocked_claims)
         return BehaviorLoopResult(
@@ -210,9 +251,107 @@ class CognitiveBehaviorRuntime:
                 intent,
                 grounding,
                 None,
+                situation_lite=lite,
                 proposed_output_state=OutputState.OUTPUT_PROPOSED,
             ),
             request,
+        )
+
+    @staticmethod
+    def _shadow_scope(result: BehaviorLoopResult) -> tuple[str, str]:
+        lite = result.trace.situation_lite
+        if lite is None:
+            return "unknown", "unknown_scope"
+        subject_scope = "private_scope_only" if lite.channel == "private" else "group_scope_only"
+        return lite.scope_id, subject_scope
+
+    def shadow_tool_preference(
+        self,
+        result: BehaviorLoopResult,
+        *,
+        explicit_memory_retrieval: bool,
+    ) -> ShadowStrategyProposal:
+        """Show one existing retrieval preference without changing the request.
+
+        ``explicit_memory_retrieval`` is supplied by the existing request Hook;
+        it is a current-message signal, never a learned or persisted flag.  A
+        proposal is shown only when the deterministic behavior path has an
+        actionable request as well.  The existing Hook still owns retrieval,
+        while this method remains a pure shadow comparison.
+        """
+        scope_id, subject_scope = self._shadow_scope(result)
+        original = "existing_memory_path_unchanged"
+        if explicit_memory_retrieval and result.realizer_request is not None:
+            return ShadowStrategyProposal(
+                kind="tool_preference",
+                scope_id=scope_id,
+                subject_scope=subject_scope,
+                original_decision=original,
+                proposed_decision="prefer_existing_memory_retrieval",
+                candidate="search_memory",
+                basis=(
+                    "current request explicitly asks to recall historical information",
+                    "SearchMemoryTool and the automatic L2 MemoryRetriever path already exist",
+                    "the request Hook remains the only retrieval consumer; this proposal does not call it",
+                ),
+                permission_effect="cannot authorize send, payment, deletion, or a new tool",
+            )
+        return ShadowStrategyProposal(
+            kind="tool_preference",
+            scope_id=scope_id,
+            subject_scope=subject_scope,
+            original_decision=original,
+            proposed_decision=original,
+            basis=(
+                "no current explicit retrieval request with an actionable cognitive request",
+                "a correction or an ordinary question is not a global retrieval preference",
+                "shadow only; no tool is called and no preference is persisted",
+            ),
+            permission_effect="cannot authorize send, payment, deletion, or a new tool",
+        )
+
+    def shadow_reply_timing_preference(
+        self, result: BehaviorLoopResult
+    ) -> ShadowStrategyProposal:
+        """Compare a group no-interjection candidate with the frozen trigger path."""
+        scope_id, subject_scope = self._shadow_scope(result)
+        trace = result.trace
+        trigger = trace.trigger
+        participation = trace.participation
+        if not trigger.should_start_loop:
+            original = trigger.exit_reason.value if trigger.exit_reason else "TRIGGER_NO"
+            proposed = original
+            basis = (
+                "the existing TriggerController fails closed for an ordinary group message",
+                "candidate is limited to this group scope and cannot promote a private preference",
+                "the current SILENCE/no-activation result remains unchanged in shadow",
+            )
+            candidate = "reduce_uninvited_group_interjection"
+        elif participation is not None:
+            original = participation.decision.value
+            proposed = original
+            basis = (
+                f"existing TriggerController activation reason: {trigger.reason}",
+                f"existing ParticipationController result {original} is preserved",
+                "private, @, and exact-reply activation stays current-request scoped",
+            )
+            candidate = None
+        else:  # pragma: no cover - defensive contract branch
+            original = "TRIGGER_YES"
+            proposed = original
+            basis = ("existing trigger result is retained",)
+            candidate = None
+        if participation is not None and participation.decision.value in {"SILENCE", "WAIT"}:
+            basis = basis + (f"existing {participation.decision.value} semantics are preserved",)
+        return ShadowStrategyProposal(
+            kind="reply_timing_preference",
+            scope_id=scope_id,
+            subject_scope=subject_scope,
+            original_decision=original,
+            proposed_decision=proposed,
+            candidate=candidate,
+            basis=basis,
+            permission_effect="cannot send, schedule, cancel, or change trigger priority",
         )
 
     def complete_realization(self, result: BehaviorLoopResult, response_text: str) -> BehaviorTrace:

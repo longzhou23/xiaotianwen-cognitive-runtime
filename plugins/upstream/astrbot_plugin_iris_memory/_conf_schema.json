@@ -247,8 +247,8 @@
       "favorability_enable": {
         "type": "bool",
         "default": true,
-        "description": "启用好感度功能",
-        "hint": "记录用户与bot的好感度（0-100），随互动演化并影响回复语气"
+        "description": "启用历史互动倾向（兼容字段）",
+        "hint": "保留 Iris 的 0-100 legacy prior；它不是 bot 当前情绪、关系事实或奖励，当前情绪由独立 affection 插件负责"
       }
     }
   },
@@ -382,6 +382,12 @@
         "default": false,
         "description": "启用自动 Episode 生命周期推进",
         "hint": "启动一个 60 秒的有界扫描任务；会把已静默 Episode 推进到 FINALIZED 并复用既有 Review/归档流程。默认关闭。"
+      },
+      "max_episodes_per_scan": {
+        "type": "int",
+        "default": 100,
+        "description": "每轮 Episode 生命周期扫描上限",
+        "hint": "每轮最多检查指定数量的 Episode，并轮转继续处理后续记录；只影响调度负载，不改变结束条件。"
       }
     }
   },

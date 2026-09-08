@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
 
 from ..contracts.validation import ContractValidationError, require_non_negative_int
-
 
 DEFAULT_SOURCE_PRIORITIES = MappingProxyType(
     {
         "persona": 10,
         "tool_rules": 20,
         "short_history": 30,
+        "conversation_history": 30,
         "shared_context": 35,
         "context_aware": 40,
         "iris_l2": 50,

@@ -63,6 +63,26 @@ class TestTaskScheduler:
         await scheduler.shutdown()
 
     @pytest.mark.asyncio
+    async def test_task_registration_is_idempotent_and_can_be_cancelled(self, scheduler):
+        """A component can own one scheduler task and remove only that task."""
+        await scheduler.initialize()
+
+        with patch("iris_memory.tasks.scheduler.random.uniform", return_value=1.0):
+            scheduler.register_periodic_task("owned_task", AsyncMock(), 1)
+            assert scheduler.is_task_registered("owned_task") is True
+
+            # A second registration check sees the same live owner; callers can
+            # therefore skip duplicate registration during restart/composition.
+            assert scheduler.is_task_registered("owned_task") is True
+            assert await scheduler.unregister_task("owned_task") is True
+
+        assert scheduler.is_task_registered("owned_task") is False
+        assert await scheduler.unregister_task("owned_task") is False
+        assert scheduler.is_available is True
+        assert scheduler._running is True
+        await scheduler.shutdown()
+
+    @pytest.mark.asyncio
     async def test_register_periodic_task_clamps_non_positive_interval(self, scheduler):
         """回归：interval_hours <= 0 应钳制为 1.0，避免 sleep(0) 忙循环
 

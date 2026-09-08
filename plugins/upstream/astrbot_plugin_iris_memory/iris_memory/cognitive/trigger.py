@@ -50,6 +50,18 @@ class TriggerController:
                 max(1, direct.score - modifier),
             )
 
+        if (
+            legacy.suppress_uninvited_group
+            and snapshot.experience.event.mode == "casual_group_chat"
+            and legacy.activation_signal != "follow_up"
+        ):
+            return TriggerDecision(
+                False,
+                "group policy suppresses uninvited activation",
+                1,
+                ExitReason.TRIGGER_NO,
+            )
+
         if legacy.activation_signal:
             score = max(1, 3 - modifier - min(legacy.consecutive_reply_penalty, 2))
             return TriggerDecision(

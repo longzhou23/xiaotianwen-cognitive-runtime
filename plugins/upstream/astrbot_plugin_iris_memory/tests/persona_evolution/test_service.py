@@ -41,9 +41,9 @@ def _setup_llm(llm, candidate=CANDIDATE):
     llm.set_default(REVIEW_MODULE, good_review_json())
 
 
-class TestManagedBlockAutoPublish:
+class TestManagedBlockCandidateOnly:
     @pytest.mark.asyncio
-    async def test_full_pipeline_auto_publish(self, storage, persona_manager, llm, service):
+    async def test_learning_pipeline_never_auto_publishes_core_persona(self, storage, persona_manager, llm, service):
         persona_manager.add_persona("p1", BASE)
         seed_samples(storage, 100)
         job_id = make_job(storage, "p1")
@@ -54,25 +54,18 @@ class TestManagedBlockAutoPublish:
 
         assert result["ok"], result
         assert result["error_code"] is None
-        # 发布到 PersonaManager，且只传 persona_id + system_prompt
-        assert persona_manager.get_prompt("p1") == CANDIDATE
-        args, kwargs = persona_manager.update_calls[0]
-        assert args == ("p1",) and set(kwargs) == {"system_prompt"}
-        # 区块外逐字节不变
-        base_split = split_managed_block(BASE)
-        cand_split = split_managed_block(persona_manager.get_prompt("p1"))
-        assert cand_split.before == base_split.before
-        assert cand_split.after == base_split.after
-        # Revision applied，校验快照通过
+        # 学习输入只能产生候选；核心 Persona 必须等管理员批准后才可修改。
+        assert persona_manager.get_prompt("p1") == BASE
+        assert persona_manager.update_calls == []
         revision = storage.get_revision(result["revision_id"])
-        assert revision.status == RevisionStatus.APPLIED.value
+        assert revision.status == RevisionStatus.CANDIDATE.value
         assert revision.validation["passed"] is True
         assert revision.style_profile["verbosity"] == "short"
         # 游标推进 + 冷却刷新
         job = storage.get_job(job_id)
         assert job.last_sample_cursor == 100
         assert job.last_success_at is not None
-        assert job.last_applied_revision_id == revision.id
+        assert job.last_applied_revision_id is None
         # Run 审计
         run = storage.get_run(result["run_id"])
         assert run.status == "success"
@@ -96,10 +89,13 @@ class TestManagedBlockAutoPublish:
 
         result = await svc.run_job(job_id, "auto")
         assert result["ok"], result
-        published = persona_manager.get_prompt("p1")
-        assert MANAGED_BLOCK_BEGIN in published
-        assert published.startswith(raw)
-        assert "新风格" in published
+        assert persona_manager.get_prompt("p1") == raw
+        assert persona_manager.update_calls == []
+        revision = storage.get_revision(result["revision_id"])
+        assert revision.status == RevisionStatus.CANDIDATE.value
+        assert MANAGED_BLOCK_BEGIN in revision.result_prompt
+        assert revision.result_prompt.startswith(raw)
+        assert "新风格" in revision.result_prompt
 
 
 class TestFullPromptReview:
@@ -127,7 +123,7 @@ class TestFullPromptReview:
         assert storage.get_job(job_id).consecutive_failures == 1
 
     @pytest.mark.asyncio
-    async def test_review_passed_publishes(self, storage, persona_manager, llm, service):
+    async def test_review_passed_stays_a_candidate(self, storage, persona_manager, llm, service):
         base = "你是 Iris，一个群聊助手，回答简洁直接，身份稳定不变。" * 3
         candidate = base.replace("简洁直接", "更加简洁", 1)
         persona_manager.add_persona("p1", base)
@@ -138,7 +134,9 @@ class TestFullPromptReview:
 
         result = await svc.run_job(job_id, "auto")
         assert result["ok"], result
-        assert persona_manager.get_prompt("p1") == candidate
+        assert persona_manager.get_prompt("p1") == base
+        assert persona_manager.update_calls == []
+        assert storage.get_revision(result["revision_id"]).status == RevisionStatus.CANDIDATE.value
         # 审查走了独立 module
         assert any(c["module"] == REVIEW_MODULE for c in llm.calls)
 
@@ -184,7 +182,8 @@ class TestTriggerConditions:
         # 凑满 100 条：触发一次
         seed_samples(storage, 1, start=99)
         assert await svc.run_trigger_scan() == 1
-        assert persona_manager.get_prompt("p1") == CANDIDATE
+        assert persona_manager.get_prompt("p1") == BASE
+        assert persona_manager.update_calls == []
 
         # 再补 100 条：冷却期内不重复触发
         seed_samples(storage, 100, start=100)
@@ -204,7 +203,8 @@ class TestTriggerConditions:
 
         result = await svc.run_job(job_id, "manual")
         assert result["ok"], result
-        assert persona_manager.get_prompt("p1") == CANDIDATE
+        assert persona_manager.get_prompt("p1") == BASE
+        assert persona_manager.update_calls == []
 
     @pytest.mark.asyncio
     async def test_manual_min_samples_deficit(self, storage, persona_manager, llm, service):
@@ -232,9 +232,11 @@ class TestExternalChange:
         _setup_llm(llm)
         svc = service()
 
-        # 先成功发布一次建立基线
+        # 先生成候选，再经显式管理员操作建立基线。
         result = await svc.run_job(job_id, "auto")
         assert result["ok"]
+        approved = await svc.approve_revision(result["revision_id"])
+        assert approved["ok"], approved
 
         # 外部编辑 Persona
         persona_manager.external_edit("p1", BASE + "\n外部新增设定\n")
@@ -365,7 +367,8 @@ class TestRetryAndCircuitBreaker:
 
         # 退避后自动重试成功
         await asyncio.sleep(1.5)
-        assert persona_manager.get_prompt("p1") == CANDIDATE
+        assert persona_manager.get_prompt("p1") == BASE
+        assert persona_manager.update_calls == []
         assert storage.get_job(job_id).last_sample_cursor == 100
         svc.cancel_pending_retries()
 

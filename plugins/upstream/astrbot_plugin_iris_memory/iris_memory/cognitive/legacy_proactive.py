@@ -53,4 +53,7 @@ class LegacyIrisProactiveSignalAdapter:
             skip_signal=bool(info.get("skip_signal", False)),
             topic_drift_signal=bool(info.get("drifted", False)),
             post_evaluation_signal=bool(info.get("post_evaluation_signal", False)),
+            suppress_uninvited_group=bool(
+                getattr(data, "no_uninvited_group_interjection", False)
+            ),
         )

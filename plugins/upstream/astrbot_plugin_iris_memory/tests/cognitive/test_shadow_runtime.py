@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from iris_memory.cognitive.contracts import (
     CanonicalExperience,
@@ -12,6 +16,7 @@ from iris_memory.cognitive.contracts import (
     EntityReference,
     ExitReason,
     GroundingEnforcement,
+    LegacyProactiveSignals,
     OutputProducer,
     OutputState,
     Perspective,
@@ -20,6 +25,7 @@ from iris_memory.cognitive.contracts import (
 )
 from iris_memory.cognitive.iris_adapter import CognitiveRuntime
 from iris_memory.cognitive.replay import LocalHistoricalReplayRunner
+from iris_memory.core.llm_request_hook import _has_memory_retrieval_intent
 
 
 _NOW = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
@@ -34,8 +40,11 @@ def _experience(
     actor_id: str = "person:qq:1",
     mode: str = "private",
     at: datetime = _NOW,
+    mention_self: bool = False,
+    reply_to_self: bool = False,
 ) -> CanonicalExperience:
     actor = EntityReference(actor_id, "test_uid", 1.0, (actor_id,))
+    self_entity = EntityReference("agent:xiaotianwen", "test_self_uid", 1.0, ("小天文",))
     event = ResolvedEvent(
         event_id=event_id,
         source="qq",
@@ -44,6 +53,8 @@ def _experience(
         mode=mode,
         content=content,
         actor=actor,
+        mentioned_entities=(self_entity,) if mention_self else (),
+        reply_to=self_entity if reply_to_self else None,
     )
     return CanonicalExperience(
         id=f"experience:{event_id}",
@@ -252,3 +263,168 @@ def test_trace_sink_failure_is_observable_not_silently_swallowed(monkeypatch, ca
             _experience("今晚几点观测？", event_id="trace:sink-error", session_id="private:trace-error")
         )
     assert "trace diagnostic write failed" in caplog.text
+
+
+def test_tool_preference_shadow_uses_existing_retrieval_only_for_current_explicit_request():
+    runtime = CognitiveRuntime()
+    recall = runtime.run_behavior(
+        _experience(
+            "你还记得我之前说过喜欢什么吗？",
+            event_id="strategy:recall",
+            session_id="private:tool-shadow",
+        )
+    )
+    recall_shadow = runtime.behavior.shadow_tool_preference(
+        recall, explicit_memory_retrieval=False
+    )
+
+    # A stored preference is not read by this preview.  With no current
+    # request signal it remains unchanged; the actual request Hook signal is
+    # passed explicitly in the next comparison.
+    assert recall_shadow.candidate is None
+    assert recall_shadow.original_decision == recall_shadow.proposed_decision
+    assert recall_shadow.executed is False
+    assert recall_shadow.applied is False
+
+    explicit = _has_memory_retrieval_intent(
+        recall.trace.situation_lite.current_topic_hint or ""
+    )
+    explicit_shadow = runtime.behavior.shadow_tool_preference(
+        recall, explicit_memory_retrieval=explicit
+    )
+    assert explicit_shadow.candidate == "search_memory"
+    assert explicit_shadow.proposed_decision == "prefer_existing_memory_retrieval"
+    assert explicit_shadow.original_decision == "existing_memory_path_unchanged"
+    assert explicit_shadow.permission_effect.startswith("cannot authorize")
+    assert "send" in explicit_shadow.permission_effect
+
+    correction = runtime.run_behavior(
+        _experience(
+            "上次答案错了",
+            event_id="strategy:correction",
+            session_id="private:tool-shadow",
+        )
+    )
+    correction_shadow = runtime.behavior.shadow_tool_preference(
+        correction,
+        explicit_memory_retrieval=_has_memory_retrieval_intent(
+            correction.trace.situation_lite.current_topic_hint or ""
+        ),
+    )
+    assert correction_shadow.candidate is None
+    assert correction_shadow.original_decision == correction_shadow.proposed_decision
+
+    ordinary_question = runtime.run_behavior(
+        _experience(
+            "今天几点开会？",
+            event_id="strategy:ordinary-question",
+            session_id="private:other",
+        )
+    )
+    ordinary_shadow = runtime.behavior.shadow_tool_preference(
+        ordinary_question,
+        explicit_memory_retrieval=False,
+    )
+    assert ordinary_shadow.candidate is None
+    assert ordinary_shadow.scope_id == "private:other"
+
+
+def test_reply_timing_shadow_keeps_private_mention_reply_group_and_wait_semantics():
+    runtime = CognitiveRuntime()
+    cases = (
+        ("private", _experience("你好？", event_id="timing:private", session_id="private:p")),
+        (
+            "mention",
+            _experience(
+                "小天文你怎么看？",
+                event_id="timing:mention",
+                session_id="group:g",
+                mode="casual_group_chat",
+                mention_self=True,
+            ),
+        ),
+        (
+            "reply",
+            _experience(
+                "接着说？",
+                event_id="timing:reply",
+                session_id="group:g",
+                mode="casual_group_chat",
+                reply_to_self=True,
+            ),
+        ),
+        (
+            "ordinary_group",
+            _experience(
+                "普通群聊",
+                event_id="timing:ordinary",
+                session_id="group:g2",
+                mode="casual_group_chat",
+            ),
+        ),
+    )
+
+    shadows = {}
+    results = {}
+    for name, experience in cases:
+        result = runtime.run_behavior(experience)
+        results[name] = result
+        shadows[name] = runtime.behavior.shadow_reply_timing_preference(result)
+        assert shadows[name].original_decision == shadows[name].proposed_decision
+        assert shadows[name].executed is False
+        assert shadows[name].applied is False
+
+    assert results["private"].trace.trigger.reason == "private message"
+    assert shadows["private"].subject_scope == "private_scope_only"
+    assert shadows["mention"].candidate is None
+    assert results["mention"].trace.trigger.reason == "explicit mention of SELF"
+    assert shadows["reply"].candidate is None
+    assert results["reply"].trace.trigger.reason == "reply to SELF"
+
+    ordinary = shadows["ordinary_group"]
+    assert ordinary.candidate == "reduce_uninvited_group_interjection"
+    assert ordinary.original_decision == "TRIGGER_NO"
+    assert ordinary.subject_scope == "group_scope_only"
+    assert "private preference" in " ".join(ordinary.basis)
+
+    waiting = runtime.run_behavior(
+        _experience("请稍等？", event_id="timing:wait", session_id="private:wait"),
+        legacy_signals=LegacyProactiveSignals(cooldown=True),
+    )
+    waiting_shadow = runtime.behavior.shadow_reply_timing_preference(waiting)
+    assert waiting.trace.participation.decision.value == "WAIT"
+    assert waiting_shadow.original_decision == "WAIT"
+    assert waiting_shadow.proposed_decision == "WAIT"
+    assert "WAIT semantics" in " ".join(waiting_shadow.basis)
+
+
+@pytest.mark.asyncio
+async def test_existing_cognitive_ingress_hook_attaches_shadow_without_changing_host_path(monkeypatch):
+    import main
+
+    runtime = CognitiveRuntime()
+    experience = _experience(
+        "你还记得我之前说过喜欢什么吗？",
+        event_id="strategy:ingress",
+        session_id="private:ingress",
+    )
+    runtime.pre_adapter.attach = MagicMock(
+        return_value=SimpleNamespace(experience=experience)
+    )
+    monkeypatch.setattr(main, "get_cognitive_runtime", lambda: runtime)
+
+    extras = {}
+    event = MagicMock()
+    event.message_str = experience.event.content
+    event.get_group_id.return_value = None
+    event.get_extra.side_effect = lambda key: extras.get(key)
+    event.set_extra.side_effect = lambda key, value: extras.__setitem__(key, value)
+    plugin = object.__new__(main.IrisMemoryPlugin)
+    plugin._state = object()
+
+    assert await plugin._handle_cognitive_behavior(event) is False
+    shadow = extras["iris_cognitive_strategy_shadow"]
+    assert shadow["tool"].candidate == "search_memory"
+    assert shadow["tool"].executed is False
+    assert shadow["reply_timing"].subject_scope == "private_scope_only"
+    event.stop_event.assert_not_called()

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 
 from astrbot_plugin_xiaotianwen_orchestrator.context import ContextAssembler
-from astrbot_plugin_xiaotianwen_orchestrator.contracts import ContextSection, TurnEnvelope
+from astrbot_plugin_xiaotianwen_orchestrator.contracts import (
+    ContextSection,
+    TurnEnvelope,
+)
 from astrbot_plugin_xiaotianwen_orchestrator.ingress import event_to_envelope
 from astrbot_plugin_xiaotianwen_orchestrator.p2 import (
     ContextProviderRegistry,
@@ -50,6 +53,14 @@ def test_hook_contract_is_serializable_and_legacy_group_compatibility_is_off() -
     assert sum(item.role == "context_assembler" for item in contracts) == 1
     compatibility = [item for item in contracts if item.role == "compatibility"]
     assert compatibility and all(not item.enabled for item in compatibility)
+    context_aware = [item for item in contracts if item.plugin == "astrbot_plugin_context_aware"]
+    assert context_aware and all(not item.enabled for item in context_aware)
+    assert any(
+        item.plugin == "xiaotianwen_orchestrator"
+        and item.hook == "conversation_context_owner"
+        and item.enabled
+        for item in contracts
+    )
     rendered = json.dumps([item.to_dict() for item in contracts], ensure_ascii=False)
     assert "ProviderRequest.prompt" in rendered
     assert "api_key" not in rendered.lower()

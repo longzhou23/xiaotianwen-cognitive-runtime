@@ -899,6 +899,142 @@ class TestExtraUserContentPartsInjection:
         assert "<iris:l2_memory>" in text
 
 
+class TestProfileRelationAndAffectProjection:
+    def test_personality_tags_are_not_projected_as_inferred_traits(self):
+        from iris_memory.core.llm_request_hook import _format_profiles_for_injection
+        from iris_memory.profile.models import GroupProfile, UserProfile
+
+        with patch(_GET_CONFIG_PATCH, return_value=MagicMock()):
+            text = _format_profiles_for_injection(
+                GroupProfile(group_id="group-1"),
+                UserProfile(user_id="user-1", personality_tags=["内向"]),
+            )
+
+        assert "内向" not in text
+        assert "性格:" not in text
+
+    def test_legacy_prior_is_not_rendered_as_current_bot_affect(self):
+        from iris_memory.core.llm_request_hook import _format_profiles_for_injection
+        from iris_memory.profile.models import GroupProfile, UserProfile
+
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "profile.favorability_enable": True,
+        }.get(key, default)
+        user_profile = UserProfile(
+            user_id="user-1",
+            emotional_baseline="敏感",
+            favorability=65.0,
+            bot_relationship="朋友",
+        )
+
+        with patch(_GET_CONFIG_PATCH, return_value=config):
+            text = _format_profiles_for_injection(
+                GroupProfile(group_id="group-1"), user_profile
+            )
+
+        assert "用户情绪倾向（画像，非当前 bot 情绪）: 敏感" in text
+        assert "历史互动倾向（legacy prior，非当前 bot 情绪）: 友好" in text
+        assert "称呼: 朋友" in text
+        assert "好感度: 65" not in text
+
+    def test_unset_legacy_prior_is_not_projected_as_a_relationship_fact(self):
+        from iris_memory.core.llm_request_hook import _format_profiles_for_injection
+        from iris_memory.profile.models import GroupProfile, UserProfile
+
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "profile.favorability_enable": True,
+        }.get(key, default)
+
+        with patch(_GET_CONFIG_PATCH, return_value=config):
+            text = _format_profiles_for_injection(
+                GroupProfile(group_id="group-1"), UserProfile(user_id="user-1")
+            )
+
+        assert "历史互动倾向" not in text
+        assert "陌生" not in text
+
+    def test_injection_run_log_keeps_metrics_but_not_request_text(self):
+        """运行日志可说明注入情况，但不能复制私聊原文或上下文正文。"""
+        from iris_memory.core.llm_request_hook import _record_injection_log
+        from iris_memory.core.run_log import (
+            get_run_log_manager,
+            reset_run_log_manager,
+        )
+
+        reset_run_log_manager()
+        event = MagicMock()
+        req = MagicMock()
+        adapter = MagicMock()
+        adapter.get_group_id.return_value = "group-test"
+        adapter.get_session_id.return_value = "session-test"
+        secret_message = "PRIVATE_USER_MESSAGE_DO_NOT_LOG"
+        secret_context = "PRIVATE_INJECTED_CONTEXT_DO_NOT_LOG"
+
+        with (
+            patch("iris_memory.platform.get_adapter", return_value=adapter),
+            patch(
+                "iris_memory.core.run_log._read_settings",
+                return_value=(True, 10, 2_000),
+            ),
+        ):
+            _record_injection_log(
+                event,
+                req,
+                l1_text=secret_context,
+                profile_text="",
+                l2_text="",
+                l3_text="",
+                learning_text="",
+                meta={
+                    "l1": {"message_count": 1},
+                    "l2": {
+                        "query": secret_message,
+                        "rewritten_query": secret_context,
+                        "result_count": 0,
+                    },
+                    "l3": {"keywords": [secret_message]},
+                },
+                combined=secret_context,
+                total_duration_ms=1.0,
+            )
+
+        entry = get_run_log_manager().get_entries("injection")[0]
+        detail = entry["detail"]
+        assert detail["total_chars"] == len(secret_context)
+        assert detail["sections"]["l1_context"]["message_count"] == 1
+        assert secret_message not in repr(detail)
+        assert secret_context not in repr(detail)
+        reset_run_log_manager()
+
+    def test_context_debug_log_keeps_layout_but_not_raw_content(self):
+        """显式开启调试摘要也不能把 Persona 或私聊正文写入日志。"""
+        from iris_memory.core.llm_request_hook import _log_final_context
+
+        secret_prompt = "PRIVATE_SYSTEM_PROMPT_DO_NOT_LOG"
+        secret_context = "PRIVATE_CONTEXT_DO_NOT_LOG"
+        req = MagicMock()
+        req.system_prompt = secret_prompt
+        req.extra_user_content_parts = [MagicMock(text=secret_context)]
+        req.contexts = [{"role": "user", "content": secret_context}]
+        req.functions = []
+        config = MagicMock()
+        config.get.return_value = True
+
+        with (
+            patch("iris_memory.config.get_config", return_value=config),
+            patch("iris_memory.core.llm_request_hook.logger.debug") as debug,
+        ):
+            _log_final_context(req)
+
+        logged = debug.call_args.args[0]
+        assert f"chars={len(secret_prompt)}" in logged
+        assert f"chars={len(secret_context)}" in logged
+        assert secret_prompt not in logged
+        assert secret_context not in logged
+
+
 class TestParseImagesTimeout:
     """测试图片解析整体超时（方案1：防止 on_llm_request 钩子阻塞会话锁）"""
 

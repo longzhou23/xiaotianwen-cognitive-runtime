@@ -7,12 +7,13 @@ import pytest
 
 from iris_memory.proactive.admin import AdminCommands
 from iris_memory.proactive.api import register_web_apis
-from iris_memory.proactive.config import ConfigManager
 from iris_memory.proactive.decision import (
     INPUT_SAFETY_COOLDOWN_MINUTES,
     DecisionCore,
+    DecisionOutcome,
     DecisionRequest,
 )
+from iris_memory.proactive.parser import Decision
 from iris_memory.proactive.perception import (
     ContextPackager,
     SlidingWindow,
@@ -256,8 +257,156 @@ class TestRuntimeSafetyPaths:
         save_fn.assert_awaited_once()
         assert INPUT_SAFETY_COOLDOWN_MINUTES == 30
 
+    @pytest.mark.asyncio
+    async def test_group_policy_stops_timer_initiation_before_provider_or_send(self, nm_config):
+        config, state, window, packager, core = _components(
+            nm_config,
+            cfg={"proactive": {"provider_id": "provider"}},
+        )
+        state.add_to_whitelist(GID)
+        state.set_no_uninvited_interjection(GID, True)
+        context = SimpleNamespace(send_message=AsyncMock())
+        engine = ProactiveEngine(
+            context,
+            config,
+            state,
+            window,
+            Mock(),
+            core,
+            Mock(),
+            llm_manager=SimpleNamespace(generate_direct=AsyncMock()),
+            packager=packager,
+            umo_get=lambda _gid: "umo",
+            is_busy=lambda _gid: False,
+            self_id_get=lambda: "bot",
+            save_fn=AsyncMock(),
+        )
+
+        result = await engine.attempt_initiate(GID)
+
+        assert result == "该群已禁止无邀请插话"
+        context.send_message.assert_not_awaited()
+        engine._llm_manager.generate_direct.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_group_policy_stops_timer_initiation_enabled_while_deciding(self, nm_config):
+        config, state, window, packager, _ = _components(
+            nm_config,
+            cfg={"proactive": {"provider_id": "provider"}},
+        )
+        state.add_to_whitelist(GID)
+
+        async def decide_while_policy_changes(*_args, **_kwargs):
+            state.set_no_uninvited_interjection(GID, True)
+            return DecisionOutcome(
+                decision=Decision(action="speak", topic="fixture"),
+                system_prompt="",
+                user_prompt="",
+            )
+
+        context = SimpleNamespace(send_message=AsyncMock())
+        engine = ProactiveEngine(
+            context,
+            config,
+            state,
+            window,
+            Mock(),
+            SimpleNamespace(decide=decide_while_policy_changes),
+            Mock(),
+            llm_manager=SimpleNamespace(generate_direct=AsyncMock()),
+            packager=packager,
+            umo_get=lambda _gid: "umo",
+            is_busy=lambda _gid: False,
+            self_id_get=lambda: "bot",
+            save_fn=AsyncMock(),
+        )
+        engine._generate_speech = AsyncMock(return_value="不会发送")
+
+        result = await engine.attempt_initiate(GID)
+
+        assert result == "该群已禁止无邀请插话"
+        context.send_message.assert_not_awaited()
+
 
 class TestResetPaths:
+    @pytest.mark.asyncio
+    async def test_main_group_hook_suppresses_uninvited_sampling(self, nm_config):
+        from main import IrisMemoryPlugin
+
+        config, state, window, _, _ = _components(nm_config)
+        state.set_no_uninvited_interjection(GID, True)
+        plugin = object.__new__(IrisMemoryPlugin)
+        plugin._reply_config = config
+        plugin._state = state
+        plugin._gatekeeper = Mock()
+        plugin._gatekeeper.should_process.return_value = True
+        plugin._gatekeeper.quality_score.return_value = 1.0
+        plugin._signals = Mock()
+        plugin._signals.evaluate_message.return_value = "chime_in"
+        plugin._sliding_window = window
+        plugin._proactive = Mock()
+        plugin._proactive.is_initiating.return_value = False
+        plugin._group_umo = {}
+        plugin._self_id = ""
+        plugin._umo_dirty = False
+        plugin._triggering = {}
+        plugin._passive_active = {}
+        plugin._reply_in_progress = {}
+        plugin._follow_pending = set()
+        event = Mock()
+        event.get_group_id.return_value = GID
+        event.get_sender_id.return_value = "u1"
+        event.get_sender_name.return_value = "User1"
+        event.get_self_id.return_value = "bot"
+        event.unified_msg_origin = "umo"
+        event.message_str = "普通群消息"
+        event.is_at_or_wake_command = False
+
+        await plugin.on_message(event)
+
+        assert plugin._signals.evaluate_message.called
+        assert plugin._triggering == {}
+
+    @pytest.mark.asyncio
+    async def test_admin_interjection_command_uses_state_manager_owner(self, nm_config):
+        from main import IrisMemoryPlugin
+
+        _, state, _, _, _ = _components(nm_config)
+        plugin = object.__new__(IrisMemoryPlugin)
+        plugin._state = state
+        plugin._admin = AdminCommands(state)
+        plugin._kv_save = AsyncMock()
+        event = Mock()
+        event.get_group_id.return_value = GID
+
+        await plugin.cmd_interjection(event, "on")
+
+        assert state.get_no_uninvited_interjection(GID) is True
+        event.set_result.assert_called_once_with(f"群 {GID} 已开启禁止无邀请插话策略")
+        assert [call.args[0] for call in plugin._kv_save.await_args_list] == [
+            "iris_reply:group_ids",
+            f"state:{GID}",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_admin_interjection_command_reports_failed_persistence(self, nm_config):
+        from main import IrisMemoryPlugin
+
+        _, state, _, _, _ = _components(nm_config)
+        plugin = object.__new__(IrisMemoryPlugin)
+        plugin._state = state
+        plugin._admin = AdminCommands(state)
+        plugin._kv_save = AsyncMock(side_effect=OSError("fixture write failure"))
+        event = Mock()
+        event.get_group_id.return_value = GID
+
+        await plugin.cmd_interjection(event, "on")
+
+        assert state.get_no_uninvited_interjection(GID) is True
+        event.set_result.assert_called_once_with(
+            f"⚠️ 群 {GID} 已开启禁止无邀请插话策略，但持久化失败；重启后可能恢复旧状态"
+        )
+
     @pytest.mark.asyncio
     async def test_admin_reset_also_clears_sliding_window(self, nm_config):
         from main import IrisMemoryPlugin

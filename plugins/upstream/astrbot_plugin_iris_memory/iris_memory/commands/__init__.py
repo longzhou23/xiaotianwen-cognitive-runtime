@@ -22,6 +22,7 @@ from .profile_handler import ProfileCommandHandler
 from .all_handler import AllCommandHandler
 from .learning_handler import LearningCommandHandler
 from .evolve_handler import EvolutionCommandHandler
+from .response_preference_handler import ResponsePreferenceCommandHandler
 from .executor import execute_command
 
 __all__ = [
@@ -40,5 +41,6 @@ __all__ = [
     "AllCommandHandler",
     "LearningCommandHandler",
     "EvolutionCommandHandler",
+    "ResponsePreferenceCommandHandler",
     "execute_command",
 ]

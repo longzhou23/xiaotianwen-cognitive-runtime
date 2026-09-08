@@ -150,6 +150,40 @@ def test_persisted_review_is_projected_only_when_a_store_is_explicitly_available
     assert persisted["evidence"] == []
 
 
+def test_persisted_review_explains_run_finding_refs_and_zero_evidence_reason():
+    store, episode, outcomes, records = _fixture(outcome_kind=OutcomeKind.EXPLICIT_CORRECTION)
+    review_store = InMemoryReviewStore()
+    facts = {(EvidenceSourceType.HOST_RESULT, ref_id): record for ref_id, record in records.items()}
+    run = review_episode(episode, outcomes, review_store, fact_envelopes=facts)
+    before_runs = review_store.list_review_runs_for_episode(episode.episode_id)
+    before_evidence = review_store.list_evidence_for_episode(episode.episode_id)
+
+    persisted = P1ObservatoryService(
+        store,
+        review_store,
+        records,
+        runtime_state={"promotion_enabled": True},
+    ).persisted_review(episode.episode_id)
+
+    assert run is not None
+    assert persisted["result_code"] == "FINDINGS_NOT_PROMOTABLE"
+    assert persisted["run_count"] == 1
+    assert persisted["finding_count"] == 1
+    assert persisted["evidence_count"] == 0
+    projected_run = persisted["runs"][0]
+    assert projected_run["episode_id"] == episode.episode_id
+    assert projected_run["status"] == "COMPLETED"
+    assert projected_run["created_at"]
+    assert projected_run["no_evidence_reason"]
+    projected_finding = projected_run["findings"][0]
+    assert projected_finding["claim"]
+    assert projected_finding["created_at"]
+    assert projected_finding["evidence_refs"]
+    assert projected_finding["evidence_refs"][0]["ref_id"]
+    assert review_store.list_review_runs_for_episode(episode.episode_id) == before_runs
+    assert review_store.list_evidence_for_episode(episode.episode_id) == before_evidence
+
+
 def test_unattached_typed_execution_is_rejected_and_missing_execution_is_not_fabricated():
     store, episode, _outcomes, records = _fixture()
     wrong = _record("event:other")
@@ -212,8 +246,10 @@ def test_human_view_keeps_engineering_raw_details_available_to_the_frontend():
 
 def test_route_service_provider_reuses_current_runtime_episode_store(monkeypatch):
     store, episode, _outcomes, _records = _fixture(state=EpisodeState.OPEN)
+    review_store = InMemoryReviewStore()
     runtime = SimpleNamespace(
         episode_observer=SimpleNamespace(store=store),
+        observatory_review_store=review_store,
         execution_observatory=None,
     )
     monkeypatch.setattr(routes, "get_cognitive_runtime", lambda: runtime)
@@ -223,6 +259,8 @@ def test_route_service_provider_reuses_current_runtime_episode_store(monkeypatch
 
     assert list_service._episode_store is store
     assert detail_service._episode_store is store
+    assert list_service._review_store is review_store
+    assert detail_service._review_store is review_store
     assert list_service.list_episodes()["episodes"][0]["episode_id"] == episode.episode_id
     assert detail_service.episode_detail(episode.episode_id)["episode"]["episode_id"] == episode.episode_id
 
@@ -375,6 +413,32 @@ def test_insufficient_review_run_is_visible_as_completed_review_artifact():
     assert summary["review_evidence"] == 0
 
 
+def test_persisted_review_distinguishes_no_run_from_run_without_findings():
+    store, episode, outcomes, records = _fixture(outcome_kind=None)
+    review_store = InMemoryReviewStore()
+    service = P1ObservatoryService(store, review_store)
+    assert service.persisted_review(episode.episode_id)["result_code"] == "NO_RUN"
+
+    class EmptyEngine:
+        def generate_findings(self, _episode, _outcomes, *, review_run_id):
+            return ()
+
+    facts = {(EvidenceSourceType.HOST_RESULT, ref_id): record for ref_id, record in records.items()}
+    run = review_episode(
+        episode,
+        outcomes,
+        review_store,
+        fact_envelopes=facts,
+        deterministic_engine=EmptyEngine(),
+    )
+    projected = service.persisted_review(episode.episode_id)
+    assert run is not None
+    assert projected["result_code"] == "NO_FINDINGS"
+    assert projected["run_count"] == 1
+    assert projected["finding_count"] == 0
+    assert projected["evidence_count"] == 0
+
+
 def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy():
     view = Path(__file__).parents[2] / "iris_memory" / "web" / "frontend" / "src" / "views" / "CognitiveObservatoryView.vue"
     source = view.read_text(encoding="utf-8")
@@ -385,6 +449,9 @@ def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy()
     assert "P1 FOUNDATION · ACCEPTED" not in source
     assert "P2b 尚未开始" in source
     assert "Unavailable" in source
+    assert "Finding 已记录，但当前不可 promotion" in source
+    assert "引用：" in source
+    assert "no_evidence_reason" in source
 
 
 class _Context:

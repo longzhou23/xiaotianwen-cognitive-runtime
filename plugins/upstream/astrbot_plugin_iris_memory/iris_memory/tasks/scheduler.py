@@ -169,6 +169,32 @@ class TaskScheduler(Component):
 
         logger.info(f"已注册周期性任务：{task_name}，间隔 {interval_hours} 小时")
 
+    def is_task_registered(self, task_name: str) -> bool:
+        """Return whether a live background task owns ``task_name``."""
+        task = self._tasks.get(task_name)
+        return task is not None and not task.done()
+
+    async def unregister_task(self, task_name: str) -> bool:
+        """Cancel and remove one periodic task without stopping the scheduler.
+
+        This is used by components that own a single scheduler registration at
+        runtime shutdown or when their explicit feature flag is disabled.
+        """
+        task = self._tasks.pop(task_name, None)
+        if task is None:
+            return False
+        self._active_tasks.discard(task_name)
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(f"取消任务 {task_name} 时任务以异常结束")
+        logger.info(f"已注销任务：{task_name}")
+        return True
+
     async def _periodic_task_wrapper(
         self,
         task_name: str,

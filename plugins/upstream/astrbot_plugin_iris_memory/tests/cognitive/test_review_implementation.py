@@ -755,6 +755,12 @@ def test_p1d2_direct_promoter_is_non_production_and_fail_closed():
     ) is None
 
 
+def test_legacy_promoter_is_not_a_package_level_production_entrypoint():
+    import iris_memory.cognitive as cognitive
+
+    assert not hasattr(cognitive, "promote_finding_to_evidence")
+
+
 def test_p1d2_snapshot_accepts_only_host_record_attached_to_current_episode():
     attached_ref = _host_ref(trace_id="trace:attached")
     episode = _episode(refs=(attached_ref,))

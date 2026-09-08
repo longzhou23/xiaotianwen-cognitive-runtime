@@ -8,8 +8,8 @@ persistence are frozen by the architecture.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from typing import Iterable
 
 from .contracts import (
     CanonicalEntity,
@@ -24,6 +24,21 @@ from .contracts import (
 
 def _mention_key(mention: str) -> str:
     return mention.strip().casefold()
+
+
+def _normalized_platform_ids(platform_ids: Mapping[str, str]) -> dict[str, str]:
+    """Normalize platform bindings at the registry's identity boundary."""
+    normalized: dict[str, str] = {}
+    for platform, platform_id in platform_ids.items():
+        platform_key = str(platform).strip().casefold()
+        stable_id = str(platform_id).strip()
+        if not platform_key or not stable_id:
+            raise CognitiveContractError("platform identity requires a platform and UID")
+        existing = normalized.get(platform_key)
+        if existing is not None and existing != stable_id:
+            raise CognitiveContractError(f"conflicting platform bindings for {platform_key}")
+        normalized[platform_key] = stable_id
+    return normalized
 
 
 class EntityRegistry(IdentityStore):
@@ -51,9 +66,16 @@ class EntityRegistry(IdentityStore):
         """Register an entity and its explicitly supplied aliases/bindings."""
         if not source:
             raise CognitiveContractError("entity registration source is required")
+        entity = replace(entity, platform_ids=_normalized_platform_ids(entity.platform_ids))
         existing = self._entities.get(entity.id)
         if existing and existing != entity:
             raise CognitiveContractError(f"entity already exists with different data: {entity.id}")
+        for platform, platform_id in entity.platform_ids.items():
+            for registered in self._entities.values():
+                if registered.id != entity.id and registered.platform_ids.get(platform) == platform_id:
+                    raise CognitiveContractError(
+                        f"platform identity already belongs to another entity: {platform}:{platform_id}"
+                    )
         self._entities[entity.id] = entity
         for alias in entity.aliases:
             self.add_claim(

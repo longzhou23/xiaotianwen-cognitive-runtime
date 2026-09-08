@@ -70,6 +70,9 @@ _KG_STOPWORDS = frozenset(
 
 _QUOTED_PATTERN = re.compile(r'[""「」『』]([^""「」『』]+)[""「」『』]')
 _CHINESE_WORD_PATTERN = re.compile(r"[一-龥]{2,6}")
+_IRIS_CONTEXT_TAG_PATTERN = re.compile(
+    r"<iris:(?P<name>\w+)>\n(?P<content>.*?)\n</iris:(?P=name)>", re.DOTALL
+)
 
 # 查询改写本身需要额外调用一次 LLM。仅在用户明确引用过去的信息、记忆、
 # 偏好或历史对话时才值得支付这段延迟；普通闲聊仍会使用原始消息做 L2 检索。
@@ -87,8 +90,69 @@ _MEMORY_INTENT_PATTERNS = (
     ),
 )
 
+# This is intentionally stricter than _MEMORY_INTENT_PATTERNS. The latter
+# also feeds ordinary L2 query rewriting, while an approved preference may
+# add a tool hint only when the user directly asks about their own history.
+_PERSONAL_MEMORY_RECALL_PATTERNS = (
+    re.compile(
+        r"(?:我(?:以前|之前|上次)(?:说过|提过|告诉过)(?:什么)?|"
+        r"我们(?:以前|之前|上次)(?:聊过|说过)(?:什么)?|"
+        r"你(?:还|是否)?记得(?:我|我们|这个私聊)|"
+        r"帮我回忆(?:一下)?(?:我们|我|之前|以前|上次)(?:的)?(?:聊天|对话|内容))"
+    ),
+    re.compile(
+        r"(?:do\s+you\s+remember\s+(?:me|what\s+i|our\s+(?:chat|conversation))|"
+        r"what\s+did\s+i\s+(?:tell|mention)\s+you|"
+        r"my\s+(?:preference|preferences|history))",
+        re.IGNORECASE,
+    ),
+)
+
 _IMAGE_QUEUE_TASK_EXTRA = "_iris_image_background_task"
 _IMAGE_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+# 注入运行日志只保留可用于诊断的、非正文的指标。检索 query、改写 query、
+# 图谱关键词和异常原文可能携带用户对话，不能作为运行日志 detail 留存。
+_INJECTION_LOG_META_FIELDS: dict[str, tuple[str, ...]] = {
+    "l1": (
+        "message_count",
+        "truncated_messages",
+        "truncated_replies",
+        "max_content_chars",
+        "duration_ms",
+        "skipped",
+    ),
+    "profile": ("duration_ms", "skipped"),
+    "l2": (
+        "result_count",
+        "injected_count",
+        "dropped_by_budget",
+        "budget_tokens",
+        "duration_ms",
+        "skipped",
+    ),
+    "l3": (
+        "strategy",
+        "node_count",
+        "edge_count",
+        "included_nodes",
+        "budget_tokens",
+        "duration_ms",
+        "skipped",
+    ),
+    "learning": (
+        "pattern_count",
+        "jargon_count",
+        "few_shot_count",
+        "dropped_by_budget",
+        "budget_tokens",
+        "used_tokens",
+        "duration_ms",
+        "skipped",
+    ),
+    "response_preference": ("status", "skipped", "duration_ms"),
+    "tool_preference": ("status", "skipped", "duration_ms"),
+}
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
@@ -133,6 +197,8 @@ async def preprocess_llm_request(
         "l2": {},
         "l3": {},
         "learning": {},
+        "response_preference": {},
+        "tool_preference": {},
     }
 
     image_started = time.perf_counter()
@@ -179,6 +245,24 @@ async def preprocess_llm_request(
             "",
         )
     )
+    response_preference_task = asyncio.create_task(
+        _run_stage(
+            "response_preference",
+            inject_meta["response_preference"],
+            _collect_response_preference(event, component_manager),
+            "",
+        )
+    )
+    tool_preference_task = asyncio.create_task(
+        _run_stage(
+            "tool_preference",
+            inject_meta["tool_preference"],
+            _collect_tool_preference(
+                event, component_manager, meta=inject_meta["tool_preference"]
+            ),
+            "",
+        )
+    )
 
     async def collect_l3_after_l2() -> str:
         _l2_text, l2_results = await l2_task
@@ -196,14 +280,27 @@ async def preprocess_llm_request(
         )
 
     l3_task = asyncio.create_task(collect_l3_after_l2())
-    l1_text, profile_text, l2_pair, l3_text, learning_text = await asyncio.gather(
-        l1_task, profile_task, l2_task, l3_task, learning_task
+    l1_text, profile_text, l2_pair, l3_text, learning_text, response_preference_text, tool_preference_text = await asyncio.gather(
+        l1_task,
+        profile_task,
+        l2_task,
+        l3_task,
+        learning_task,
+        response_preference_task,
+        tool_preference_task,
     )
     l2_text, _l2_results = l2_pair
     total_duration_ms = _elapsed_ms(preprocess_started)
 
     combined = _inject_to_extra_user_content_parts(
-        req, l1_text, profile_text, l2_text, l3_text, learning_text
+        req,
+        l1_text,
+        profile_text,
+        l2_text,
+        l3_text,
+        learning_text,
+        response_preference_text,
+        tool_preference_text,
     )
 
     _record_injection_log(
@@ -214,9 +311,10 @@ async def preprocess_llm_request(
         l2_text=l2_text,
         l3_text=l3_text,
         learning_text=learning_text,
+        response_preference_text=response_preference_text,
+        tool_preference_text=tool_preference_text,
         meta=inject_meta,
         combined=combined,
-        user_message=user_message,
         total_duration_ms=total_duration_ms,
     )
 
@@ -225,6 +323,113 @@ async def preprocess_llm_request(
 
 def _elapsed_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 2)
+
+
+async def _collect_response_preference(
+    event: "AstrMessageEvent",
+    component_manager: "ComponentManager",
+    meta: Optional[dict] = None,
+) -> str:
+    """Read the one approved preference at the final request boundary."""
+
+    from iris_memory.profile.response_preferences import (
+        explicit_detail_request,
+        format_response_preferences,
+    )
+    from iris_memory.profile.storage import ProfileStorage
+
+    try:
+        storage = component_manager.get_available_component("profile", ProfileStorage)
+    except Exception:  # noqa: BLE001 - unavailable component must fail closed
+        storage = None
+    if not isinstance(storage, ProfileStorage):
+        if meta is not None:
+            meta["skipped"] = "component_unavailable"
+        return ""
+
+    message = getattr(event, "message_str", "")
+    if not isinstance(message, str):
+        getter = getattr(event, "get_message_str", None)
+        try:
+            message = getter() if callable(getter) else ""
+        except Exception:  # noqa: BLE001 - malformed accessor must fail closed
+            message = ""
+    if explicit_detail_request(message):
+        if meta is not None:
+            meta["skipped"] = "current_request_explicitly_detailed"
+        return ""
+
+    records = await storage.active_response_preference_records_for_event(event)
+    if records is None:
+        if meta is not None:
+            meta["skipped"] = "preference_read_failed"
+        return ""
+    if not records:
+        if meta is not None:
+            meta["skipped"] = "no_active_preference"
+        return ""
+    if meta is not None:
+        meta["status"] = "+".join(record.status for record in records)
+    return format_response_preferences(records)
+
+
+async def _collect_tool_preference(
+    event: "AstrMessageEvent",
+    component_manager: "ComponentManager",
+    meta: Optional[dict] = None,
+) -> str:
+    """Read the one approved retrieval hint at the final request boundary.
+
+    The hint is deliberately narrower than L2 retrieval itself: it is only
+    active for an exact private scope and an explicit historical-recall
+    request.  It never grants a tool, starts a tool call, or changes reply
+    timing.
+    """
+
+    from iris_memory.profile.response_preferences import (
+        event_contains_indirect_content,
+        explicit_no_tool_request,
+        format_tool_preference,
+    )
+    from iris_memory.profile.storage import ProfileStorage
+
+    try:
+        storage = component_manager.get_available_component("profile", ProfileStorage)
+    except Exception:  # noqa: BLE001 - unavailable component must fail closed
+        storage = None
+    if not isinstance(storage, ProfileStorage):
+        if meta is not None:
+            meta["skipped"] = "component_unavailable"
+        return ""
+
+    message = getattr(event, "message_str", "")
+    if not isinstance(message, str):
+        getter = getattr(event, "get_message_str", None)
+        try:
+            message = getter() if callable(getter) else ""
+        except Exception:  # noqa: BLE001 - malformed accessor must fail closed
+            message = ""
+    if explicit_no_tool_request(message):
+        if meta is not None:
+            meta["skipped"] = "current_request_explicitly_disables_tools"
+        return ""
+    if event_contains_indirect_content(event):
+        if meta is not None:
+            meta["skipped"] = "indirect_current_request"
+        return ""
+    if not _has_explicit_personal_memory_recall(message):
+        if meta is not None:
+            meta["skipped"] = "no_explicit_historical_recall"
+        return ""
+
+    record = await storage.active_memory_retrieval_preference_for_event(event)
+    if record is None:
+        if meta is not None:
+            meta["skipped"] = "no_active_preference"
+        return ""
+    if meta is not None:
+        meta["status"] = record.status
+    return format_tool_preference(record)
 
 
 async def _run_stage(
@@ -346,8 +551,9 @@ def _record_injection_log(
     learning_text: str,
     meta: dict,
     combined: str,
-    user_message: str,
     total_duration_ms: float,
+    response_preference_text: str = "",
+    tool_preference_text: str = "",
 ) -> None:
     """写入统一运行日志（injection 类型），失败不影响主流程"""
     try:
@@ -365,11 +571,17 @@ def _record_injection_log(
             pass
 
         sections = {
-            "l1_context": {"chars": len(l1_text), "injected": bool(l1_text), **meta.get("l1", {})},
-            "profile": {"chars": len(profile_text), "injected": bool(profile_text), **meta.get("profile", {})},
-            "l2_memory": {"chars": len(l2_text), "injected": bool(l2_text), **meta.get("l2", {})},
-            "l3_kg": {"chars": len(l3_text), "injected": bool(l3_text), **meta.get("l3", {})},
-            "learning": {"chars": len(learning_text), "injected": bool(learning_text), **meta.get("learning", {})},
+            "l1_context": _injection_log_section("l1", l1_text, meta),
+            "profile": _injection_log_section("profile", profile_text, meta),
+            "l2_memory": _injection_log_section("l2", l2_text, meta),
+            "l3_kg": _injection_log_section("l3", l3_text, meta),
+            "learning": _injection_log_section("learning", learning_text, meta),
+            "response_style_preference": _injection_log_section(
+                "response_preference", response_preference_text, meta
+            ),
+            "tool_preference": _injection_log_section(
+                "tool_preference", tool_preference_text, meta
+            ),
         }
         injected_count = sum(1 for s in sections.values() if s["injected"])
 
@@ -378,7 +590,10 @@ def _record_injection_log(
             image_meta = None
 
         if injected_count:
-            title = f"注入 {injected_count} 个 section（共 {len(combined)} 字符）"
+            title = (
+                f"注入 {injected_count} 个 section（共 "
+                f"{len(combined) + len(response_preference_text) + len(tool_preference_text)} 字符）"
+            )
         else:
             title = "所有 section 均为空，未注入"
 
@@ -388,20 +603,43 @@ def _record_injection_log(
             success=injected_count > 0,
             group_id=group_id,
             session_id=session_id,
-            user_message=user_message,
             injected_sections=injected_count,
-            total_chars=len(combined),
+            total_chars=(
+                len(combined)
+                + len(response_preference_text)
+                + len(tool_preference_text)
+            ),
             sections=sections,
             image=image_meta,
             stage_timings_ms={
                 stage: round(float(meta.get(stage, {}).get("duration_ms", 0.0)), 2)
-                for stage in ("image", "l1", "profile", "l2", "l3", "learning")
+                for stage in (
+                    "image",
+                    "l1",
+                    "profile",
+                    "l2",
+                    "l3",
+                    "learning",
+                    "response_preference",
+                    "tool_preference",
+                )
             },
             total_duration_ms=round(total_duration_ms, 2),
-            content=combined,
         )
     except Exception as e:
         logger.debug(f"注入运行日志记录失败（已忽略）：{e}")
+
+
+def _injection_log_section(stage: str, text: str, meta: dict) -> dict:
+    """返回一段注入日志的脱敏指标，不透传收集阶段的原始输入。"""
+    source = meta.get(stage, {})
+    fields = _INJECTION_LOG_META_FIELDS[stage]
+    section = {"chars": len(text), "injected": bool(text)}
+    for field in fields:
+        value = source.get(field)
+        if isinstance(value, (str, int, float, bool)):
+            section[field] = value
+    return section
 
 
 def _inject_to_extra_user_content_parts(
@@ -411,6 +649,8 @@ def _inject_to_extra_user_content_parts(
     l2_text: str,
     l3_text: str,
     learning_text: str = "",
+    response_preference_text: str = "",
+    tool_preference_text: str = "",
 ) -> str:
     """将所有动态内容注入到 req.extra_user_content_parts
 
@@ -449,6 +689,8 @@ def _inject_to_extra_user_content_parts(
             inject_summary.append(f"{section_name}(空)")
 
     if not parts:
+        _replace_response_preference_part(req, response_preference_text)
+        _replace_tool_preference_part(req, tool_preference_text)
         logger.debug("注入摘要：所有 section 均为空，跳过注入")
         return ""
 
@@ -465,7 +707,90 @@ def _inject_to_extra_user_content_parts(
 
     req.extra_user_content_parts.append(text_part)
 
+    _replace_response_preference_part(req, response_preference_text)
+    _replace_tool_preference_part(req, tool_preference_text)
+
     return combined
+
+
+def _replace_response_preference_part(
+    req: "ProviderRequest", response_preference_text: str
+) -> None:
+    """Replace only the controlled preference block, preserving other context."""
+
+    parts = getattr(req, "extra_user_content_parts", None)
+    if not isinstance(parts, list):
+        return
+    filtered = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        lines = text.splitlines() if isinstance(text, str) else []
+        is_controlled_block = (
+            len(lines) in {7, 8, 9}
+            and lines[0] == "<iris:response_style_preference>"
+            and lines[1] == "这是用户在当前这一处私聊中明确提出、并经维护者人工批准的表达偏好。"
+            and lines[-4] == "若用户本轮明确要求详细或完整展开，必须完整展开。"
+            and lines[-3] == "不得因此改变是否回复、工具选择、发送时机、检索量、权限、情绪或角色设定。"
+            and lines[-2] == "这是受控的表达建议，不对模型输出构成强制保证。"
+            and lines[-1] == "</iris:response_style_preference>"
+            and all(
+                line
+                in {
+                    "表达顺序：先给直接结论，再按当前问题需要补充说明。",
+                    "表达长度：默认减少非必要展开，不机械截断；保留必要依据、执行结果和错误信息。",
+                    "互动语气：可使用自然、熟悉的日常语气；不得假定共同经历，不得声称亲属、恋爱或其他未明确的关系。",
+                    "若用户本轮明确要求详细或完整展开，必须完整展开。",
+                }
+                for line in lines[2:-4]
+            )
+        )
+        if is_controlled_block:
+            continue
+        filtered.append(part)
+    parts[:] = filtered
+    if not response_preference_text:
+        return
+
+    from astrbot.core.agent.message import TextPart as _TextPart
+
+    text_part = _TextPart(text=response_preference_text)
+    if hasattr(text_part, "mark_as_temp"):
+        text_part.mark_as_temp()
+    parts.append(text_part)
+
+
+def _replace_tool_preference_part(
+    req: "ProviderRequest", tool_preference_text: str
+) -> None:
+    """Replace only the controlled retrieval hint, preserving other context."""
+
+    parts = getattr(req, "extra_user_content_parts", None)
+    if not isinstance(parts, list):
+        return
+    filtered = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        lines = text.splitlines() if isinstance(text, str) else []
+        is_controlled_block = lines == [
+            "<iris:tool_preference>",
+            "这是当前这一处私聊经维护者批准的工具偏好，仅作当前请求的辅助建议。",
+            "若当前请求明确要求回忆历史信息，可优先使用已有 search_memory 只读记忆检索。",
+            "不得因此新增工具权限、调用网络工具、发送消息、付费、删除数据或跳过必要操作。",
+            "若用户本轮明确要求不联网、不调用工具或不检索，以本轮要求为准。",
+            "</iris:tool_preference>",
+        ]
+        if not is_controlled_block:
+            filtered.append(part)
+    parts[:] = filtered
+    if not tool_preference_text:
+        return
+
+    from astrbot.core.agent.message import TextPart as _TextPart
+
+    text_part = _TextPart(text=tool_preference_text)
+    if hasattr(text_part, "mark_as_temp"):
+        text_part.mark_as_temp()
+    parts.append(text_part)
 
 
 async def _build_image_map(
@@ -896,6 +1221,18 @@ def _has_memory_retrieval_intent(text: str) -> bool:
     return any(pattern.search(text) for pattern in _MEMORY_INTENT_PATTERNS)
 
 
+def _has_explicit_personal_memory_recall(text: str) -> bool:
+    """Return whether the request directly asks about the user's own past chat.
+
+    This gate controls the approved L18 tool hint only. It excludes broad
+    history and time words that may be ordinary factual questions.
+    """
+
+    return isinstance(text, str) and any(
+        pattern.search(text) for pattern in _PERSONAL_MEMORY_RECALL_PATTERNS
+    )
+
+
 async def _collect_l2_memory(
     event: "AstrMessageEvent",
     component_manager: "ComponentManager",
@@ -1314,8 +1651,6 @@ def _format_profiles_for_injection(
         user_parts.append(f"昵称: {user_profile.user_name}")
     if user_profile.historical_names:
         user_parts.append(f"曾用昵称: {', '.join(user_profile.historical_names)}")
-    if user_profile.personality_tags:
-        user_parts.append(f"性格: {', '.join(user_profile.personality_tags)}")
     if user_profile.interests:
         user_parts.append(f"兴趣: {', '.join(user_profile.interests)}")
     if user_profile.occupation:
@@ -1325,10 +1660,14 @@ def _format_profiles_for_injection(
     if user_profile.communication_style:
         user_parts.append(f"沟通偏好: {user_profile.communication_style}")
     if user_profile.emotional_baseline:
-        user_parts.append(f"情感: {user_profile.emotional_baseline}")
+        user_parts.append(
+            f"用户情绪倾向（画像，非当前 bot 情绪）: {user_profile.emotional_baseline}"
+        )
     if favorability_enabled and user_profile.favorability > 0:
         level = favorability_level(user_profile.favorability)
-        user_parts.append(f"好感度: {int(user_profile.favorability)}({level})")
+        user_parts.append(
+            f"历史互动倾向（legacy prior，非当前 bot 情绪）: {level}"
+        )
     if user_profile.bot_relationship:
         user_parts.append(f"称呼: {user_profile.bot_relationship}")
     if user_profile.important_dates:
@@ -1624,9 +1963,7 @@ async def _parse_images_if_related_mode(
 
 
 def _log_final_context(req: "ProviderRequest") -> None:
-    """输出最终上下文内容的 debug 日志
-
-    在所有注入完成后，输出完整的上下文信息用于问题排查。
+    """输出最终上下文的结构化 debug 摘要，不记录提示词或消息正文。
 
     Args:
         req: LLM 提供者请求对象
@@ -1637,68 +1974,49 @@ def _log_final_context(req: "ProviderRequest") -> None:
     if not config.get("enable_context_logging", False):
         return
 
-    log_parts = ["\n" + "=" * 60 + "\n[LLM 请求上下文详情]\n" + "=" * 60]
-
-    if req.system_prompt:
-        log_parts.append(
-            f"\n[System Prompt]\n{'-' * 40}\n{req.system_prompt}\n{'-' * 40}"
-        )
-    else:
-        log_parts.append("\n[System Prompt]\n(无)")
+    log_parts = ["[LLM 请求上下文摘要]"]
+    system_prompt = getattr(req, "system_prompt", "") or ""
+    log_parts.append(
+        f"system_prompt: present={bool(system_prompt)}, chars={len(system_prompt)}"
+    )
 
     if req.extra_user_content_parts:
         log_parts.append(
-            f"\n[Extra User Content Parts] (共 {len(req.extra_user_content_parts)} 个)"
+            f"extra_user_content_parts: count={len(req.extra_user_content_parts)}"
         )
-        import re as _re
-
-        _iris_tag_pattern = _re.compile(r"<iris:(\w+)>\n(.*?)\n</iris:\1>", _re.DOTALL)
-        _section_truncation = 300
-
         for i, part in enumerate(req.extra_user_content_parts, 1):
             text = getattr(part, "text", None) or str(part)
-            tag_sections = _iris_tag_pattern.findall(text)
+            tag_sections = list(_IRIS_CONTEXT_TAG_PATTERN.finditer(text))
             if tag_sections:
-                log_parts.append(f"  [{i}] ({len(text)} 字符)")
-                for sec_name, sec_content in tag_sections:
-                    display = sec_content
-                    if len(display) > _section_truncation:
-                        display = (
-                            display[: _section_truncation // 2]
-                            + f"\n  ... 省略 {len(display) - _section_truncation} 字 ...\n"
-                            + display[-_section_truncation // 2 :]
-                        )
-                    log_parts.append(f"    <iris:{sec_name}> ({len(sec_content)} 字)")
-                    for line in display.split("\n"):
-                        log_parts.append(f"      {line}")
+                log_parts.append(f"  part[{i}]: chars={len(text)}")
+                for match in tag_sections:
+                    log_parts.append(
+                        "    iris_section: "
+                        f"name={match.group('name')}, "
+                        f"chars={len(match.group('content'))}"
+                    )
             else:
-                if len(text) > 500:
-                    text = text[:500] + "..."
-                log_parts.append(f"  [{i}] {text}")
+                log_parts.append(f"  part[{i}]: chars={len(text)}, iris_tags=0")
     else:
-        log_parts.append("\n[Extra User Content Parts]\n(无)")
+        log_parts.append("extra_user_content_parts: count=0")
 
     if req.contexts:
-        log_parts.append(f"\n[Contexts] (共 {len(req.contexts)} 条)")
+        log_parts.append(f"contexts: count={len(req.contexts)}")
         for i, ctx in enumerate(req.contexts, 1):
             role = ctx.get("role", "unknown")
             content = ctx.get("content", "")
-            if len(content) > 200:
-                content = content[:200] + "..."
-            log_parts.append(f"  [{i}] {role}: {content}")
+            log_parts.append(f"  context[{i}]: role={role}, chars={len(content)}")
     else:
-        log_parts.append("\n[Contexts]\n(无)")
+        log_parts.append("contexts: count=0")
 
     if hasattr(req, "functions") and req.functions:
-        log_parts.append(f"\n[Functions] (共 {len(req.functions)} 个)")
+        log_parts.append(f"functions: count={len(req.functions)}")
         for i, func in enumerate(req.functions, 1):
             name = (
                 func.get("name", "unknown")
                 if isinstance(func, dict)
                 else getattr(func, "name", "unknown")
             )
-            log_parts.append(f"  [{i}] {name}")
-
-    log_parts.append("\n" + "=" * 60)
+            log_parts.append(f"  function[{i}]: name={name}")
 
     logger.debug("\n".join(log_parts))

@@ -91,6 +91,7 @@ class P2r0CaptureService:
         store: P2r0Store,
         runtime: CognitiveRuntime,
         semantic_authority_service: object | None = None,
+        feedback_observer: object | None = None,
     ) -> None:
         if type(store) is not P2r0Store:
             raise TypeError("capture service requires the authoritative P2r0Store")
@@ -99,6 +100,14 @@ class P2r0CaptureService:
         self._store = store
         self._runtime = runtime
         self._semantic_authority_service = semantic_authority_service
+        self._feedback_observer = feedback_observer
+        if feedback_observer is not None:
+            observe_inbound_event = getattr(feedback_observer, "observe_inbound_event", None)
+            if not callable(observe_inbound_event):
+                raise TypeError("feedback observer requires observe_inbound_event")
+            bind_archive_store = getattr(feedback_observer, "bind_archive_store", None)
+            if callable(bind_archive_store):
+                bind_archive_store(store)
         observer = runtime.episode_observer
         bind_reply_resolver = getattr(
             observer, "bind_native_host_reply_resolver", None
@@ -239,6 +248,12 @@ class P2r0CaptureService:
                 reply_target_platform_message_identity=target_identity,
             )
             self._store.record_inbound_reply_fact(fact)
+            feedback_observer = self._feedback_observer
+            if feedback_observer is not None:
+                try:
+                    feedback_observer.observe_inbound_event(event, fact)
+                except Exception as exc:  # noqa: BLE001 - feedback never controls capture
+                    logger.warning("L09 response-length feedback observation rejected: %s", exc)
             semantic_service = self._semantic_authority_service
             if semantic_service is not None:
                 try:
@@ -368,6 +383,7 @@ def create_runtime_capture_service(
     data_dir: str | Path,
     runtime: CognitiveRuntime,
     semantic_authority_service: object | None = None,
+    feedback_observer: object | None = None,
 ) -> P2r0CaptureService:
     """Create runtime capture with the production semantic service composition.
 
@@ -388,7 +404,12 @@ def create_runtime_capture_service(
             semantic_service = create_runtime_semantic_authority_service(data_dir)
         except Exception:
             logger.exception("P2r1a semantic authority store unavailable; P2r0 remains enabled")
-    return P2r0CaptureService(store, runtime, semantic_service)
+    return P2r0CaptureService(
+        store,
+        runtime,
+        semantic_service,
+        feedback_observer=feedback_observer,
+    )
 
 
 ReplyLinkCaptureService = P2r0CaptureService

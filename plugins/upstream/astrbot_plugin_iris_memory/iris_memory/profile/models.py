@@ -343,7 +343,7 @@ class UserProfile(ProfileMetadataMixin):
         language_style: 常用语言风格（中期）
         communication_style: 期望的沟通偏好（中期，如简洁/详细/随意/正式）
         emotional_baseline: 情感基线（中期，如稳定/敏感/乐观/低落）
-        favorability: 好感度 0-100（中期，随近期互动演化）
+        favorability: 历史互动倾向 0-100（legacy prior；中期，随近期互动演化）
 
         bot_relationship: 对bot的称呼/关系设定（长期）
         important_dates: 重要纪念日（长期）
@@ -368,6 +368,7 @@ class UserProfile(ProfileMetadataMixin):
     language_style: str = ""
     communication_style: str = ""
     emotional_baseline: str = ""
+    # 保留历史数值兼容性；它不是 bot 的 current-affect 状态，也不是 Evidence。
     favorability: float = 0.0
 
     bot_relationship: str = ""

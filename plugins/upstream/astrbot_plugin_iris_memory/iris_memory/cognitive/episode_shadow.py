@@ -244,6 +244,15 @@ class EpisodeShadowObserver:
                         provenance=("episode_shadow_observer",),
                     )
                 )
+            if ep.state is EpisodeState.FINALIZED:
+                # FINALIZED is immutable.  A late Host callback cannot reopen
+                # or rewrite its durable Review boundary, and raising here only
+                # floods production logs after the lifecycle scan wins a race.
+                logger.info(
+                    "Late Host output ignored for finalized Episode (episode=%s)",
+                    ep.episode_id,
+                )
+                return
             ref = self._host_ref(record)
             self.store.append_event_ref(ep.episode_id, ref)
         except Exception:
@@ -255,6 +264,12 @@ class EpisodeShadowObserver:
         try:
             ep = self.store.find_episode_by_trace_id(record.trace.trace_id)
             if ep is None:
+                return
+            if ep.state is EpisodeState.FINALIZED:
+                logger.info(
+                    "Late dispatch ignored for finalized Episode (episode=%s)",
+                    ep.episode_id,
+                )
                 return
             ref = EpisodeEventRef(
                 ref_id=make_episode_event_ref_id(

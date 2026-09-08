@@ -24,7 +24,6 @@ from .fakes import (
     ANALYSIS_MODULE,
     GENERATION_MODULE,
     REVIEW_MODULE,
-    FakeContext,
     FakePersonaManager,
     good_analysis_json,
     good_generation_json,
@@ -64,7 +63,7 @@ async def _run_to_candidate(storage, persona_manager, llm, service, candidate=CA
 
 
 async def _publish_two_versions(storage, persona_manager, llm, service):
-    """自动 Job 连发两个版本；返回 (svc, job_id, v1_id, v2_id)"""
+    """Create and explicitly approve two revisions for rollback fixtures."""
     persona_manager.add_persona("p1", BASE)
     seed_samples(storage, 100)
     job_id = make_job(storage, "p1")
@@ -72,9 +71,13 @@ async def _publish_two_versions(storage, persona_manager, llm, service):
     svc = service()
     r1 = await svc.run_job(job_id, "manual")
     assert r1["ok"] and not r1["no_change"], r1
+    approved_1 = await svc.approve_revision(r1["revision_id"])
+    assert approved_1["ok"], approved_1
     llm.push(GENERATION_MODULE, good_generation_json(CANDIDATE2))
     r2 = await svc.run_job(job_id, "manual")
     assert r2["ok"] and not r2["no_change"], r2
+    approved_2 = await svc.approve_revision(r2["revision_id"])
+    assert approved_2["ok"], approved_2
     assert persona_manager.get_prompt("p1") == CANDIDATE2
     return svc, job_id, r1["revision_id"], r2["revision_id"]
 
@@ -287,6 +290,8 @@ class TestAdoptCurrent:
         svc = service()
         r1 = await svc.run_job(job_id, "manual")
         assert r1["ok"], r1
+        approved = await svc.approve_revision(r1["revision_id"])
+        assert approved["ok"], approved
         persona_manager.external_edit("p1", "外部改的新内容")
         r2 = await svc.run_job(job_id, "manual")
         assert r2["error_code"] == ErrorCode.EXTERNAL_CHANGE.value
@@ -321,6 +326,9 @@ class TestAdoptCurrent:
         llm.push(GENERATION_MODULE, good_generation_json(new_candidate))
         r3 = await svc.run_job(job_id, "manual")
         assert r3["ok"], r3
+        assert persona_manager.get_prompt("p1") == "外部改的新内容"
+        approved = await svc.approve_revision(r3["revision_id"])
+        assert approved["ok"], approved
         assert persona_manager.get_prompt("p1") == new_candidate
 
     @pytest.mark.asyncio
@@ -400,10 +408,13 @@ class TestApprovalModeSwitch:
         # 旧 candidate 不被追溯发布
         assert persona_manager.get_prompt("p1") == BASE
 
-        # 新一轮运行只发布本轮新候选
+        # 新一轮仍只生成候选；切换模式不绕过人工批准。
         llm.push(GENERATION_MODULE, good_generation_json(CANDIDATE2))
         r2 = await svc.run_job(job_id, "manual")
         assert r2["ok"], r2
+        assert persona_manager.get_prompt("p1") == BASE
+        approved = await svc.approve_revision(r2["revision_id"])
+        assert approved["ok"], approved
         assert persona_manager.get_prompt("p1") == CANDIDATE2
         # 旧 candidate 保持 candidate 状态
         assert storage.get_revision(rev_id).status == CANDIDATE_S
@@ -422,6 +433,8 @@ class TestExportImport:
         svc = service()
         r1 = await svc.run_job(job_id, "manual")
         assert r1["ok"], r1
+        approved = await svc.approve_revision(r1["revision_id"])
+        assert approved["ok"], approved
         storage.update_job(job_id, {"approval_mode": "manual"})
         llm.push(GENERATION_MODULE, good_generation_json(CANDIDATE2))
         r2 = await svc.run_job(job_id, "manual")

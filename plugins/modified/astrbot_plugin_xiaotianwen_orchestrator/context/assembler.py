@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from ..contracts import ContextSection
-from ..contracts.validation import ContractValidationError, JsonValue, sha256_text, structural_fingerprint
+from ..contracts.validation import (
+    ContractValidationError,
+    JsonValue,
+    sha256_text,
+    structural_fingerprint,
+)
 from .budgets import ContextAssemblyPolicy
 
 
@@ -95,11 +100,20 @@ class ContextAssembler:
                 raise ContractValidationError("assembler accepts only ContextSection values")
             candidates.append((index, section))
         candidates.sort(key=lambda item: (item[1].priority, item[0]))
+        has_conversation_history = any(
+            section.source == "conversation_history" for _, section in candidates
+        )
 
         selected: list[ContextSection] = []
         dropped: list[tuple[str, str]] = []
         seen_sources: set[str] = set()
         for _, section in candidates:
+            if has_conversation_history and section.source == "context_aware":
+                dropped.append((section.source, "retired_history_owner"))
+                continue
+            if has_conversation_history and section.source == "short_history":
+                dropped.append((section.source, "duplicate_history_owner"))
+                continue
             if self.policy.excludes(section.source, route):
                 dropped.append((section.source, "route_excluded"))
                 continue

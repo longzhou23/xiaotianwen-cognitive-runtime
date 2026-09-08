@@ -20,7 +20,9 @@ logger = get_logger("profile")
 
 
 # LLM 分析时从画像字典中剥离的纯元数据字段（对分析无价值，徒增 token）
-_ANALYSIS_STRIP_KEYS = frozenset({"field_meta", "update_tracker", "version"})
+_ANALYSIS_STRIP_KEYS = frozenset(
+    {"field_meta", "update_tracker", "version", "personality_tags"}
+)
 
 
 def _slim_profile_dict(profile: Dict) -> Dict:
@@ -329,7 +331,6 @@ class ProfileAnalyzer:
 
 返回JSON：
 {{
-    "personality_tags": ["性格标签"],
     "interests": ["兴趣"],
     "language_style": "语言风格",
     "communication_style": "沟通偏好",
@@ -337,10 +338,9 @@ class ProfileAnalyzer:
 {self._favorability_schema_line(favorability_enabled)}    "custom_fields": {{"字段名": "值"}}
 }}
 
-1. personality_tags 最多3个
-2. interests 返回完整列表，最多5个，不再活跃的不要保留
-3. communication_style 选：简洁/详细/随意/正式，无法判断留空
-4. emotional_baseline 选：稳定/敏感/乐观/低落/焦虑，无法判断留空
+1. interests 返回完整列表，最多5个，不再活跃的不要保留
+2. communication_style 选：简洁/详细/随意/正式，无法判断留空
+3. emotional_baseline 选：稳定/敏感/乐观/低落/焦虑，无法判断留空
 {self._favorability_instruction_line(favorability_enabled)}{self._mid_tail_instructions(favorability_enabled)}
 仅返回JSON。"""
 
@@ -377,7 +377,6 @@ class ProfileAnalyzer:
     "important_events": ["重要事件"],
     "taboo_topics": ["禁忌话题"],
     "important_dates": [{{"date": "日期", "description": "描述"}}],
-    "personality_tags": ["性格标签（如有变化）"],
     "interests": ["兴趣（如有变化）"],
     "language_style": "语言风格（如有变化）",
     "communication_style": "沟通偏好（如有变化）",
@@ -422,7 +421,6 @@ class ProfileAnalyzer:
 
 返回JSON：
 {{
-    "personality_tags": ["性格标签"],
     "interests": ["兴趣"],
     "language_style": "语言风格",
     "communication_style": "沟通偏好",
@@ -435,10 +433,9 @@ class ProfileAnalyzer:
     "custom_fields": {{"字段名": "值"}}
 }}
 
-1. personality_tags 最多3个
-2. interests 返回完整列表，最多5个，不再活跃的不要保留
-3. communication_style 选：简洁/详细/随意/正式，无法判断留空
-4. emotional_baseline 选：稳定/敏感/乐观/低落/焦虑，无法判断留空
+1. interests 返回完整列表，最多5个，不再活跃的不要保留
+2. communication_style 选：简洁/详细/随意/正式，无法判断留空
+3. emotional_baseline 选：稳定/敏感/乐观/低落/焦虑，无法判断留空
 {self._favorability_instruction_line(favorability_enabled)}{self._combined_tail_instructions(favorability_enabled)}
 仅返回JSON。"""
 
@@ -455,7 +452,7 @@ class ProfileAnalyzer:
         """返回 JSON schema 中 favorability_delta 行（含缩进与换行）。"""
         if not enabled:
             return ""
-        return '    "favorability_delta": 整数,\n'
+        return '    "favorability_delta": 整数（历史互动倾向的变化量，legacy prior）,\n'
 
     @staticmethod
     def _favorability_instruction_line(enabled: bool) -> str:
@@ -463,8 +460,8 @@ class ProfileAnalyzer:
         if not enabled:
             return ""
         return (
-            "5. favorability_delta：用户对AI好感度变化量（-20~+20整数），"
-            "根据语气友好度/互动积极性/冲突情况调整；无明显变化返回0\n"
+            "5. favorability_delta：历史互动倾向变化量（-20~+20整数，legacy prior），"
+            "根据语气友好度/互动积极性/冲突情况调整；它不是 bot 当前情绪、关系事实或奖励；无明显变化返回0\n"
         )
 
     @staticmethod

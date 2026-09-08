@@ -466,31 +466,16 @@ class PersonaEvolutionService:
                     job, run_id, first.code, first.message, result
                 )
 
-            # ---- 审批模式 ----
-            if job.approval_mode == ApprovalMode.MANUAL.value:
-                # 停在 candidate 待审批；推进游标但不刷新成功冷却（未发布）
-                self._advance_cursor_only(job, samples)
-                self._finish_run(run_id, RunStatus.SUCCESS)
-                result.update(ok=True, message="候选已生成，等待管理员审批")
-                return result
-
-            # ---- 自动发布（§11.1）----
-            revision = self._storage.get_revision(revision_id)
-            p_err = await self._publisher.publish(job, revision)
-            if p_err is not None:
-                if p_err == ErrorCode.BASE_HASH_MISMATCH:
-                    # 生成后 Persona 被外部编辑：不覆盖，转冲突（§11.2/§12.1）
-                    self._record_external_change(job, revision, current_prompt=None)
-                    return fail(
-                        ErrorCode.EXTERNAL_CHANGE,
-                        "发布前检测到外部修改，Job 已转 conflict",
-                    )
-                return fail(p_err, f"发布失败：{p_err.value}")
-
-            # ---- 成功：推进游标 + 刷新冷却（§8.3 失败才不动）----
+            # ---- Core Persona publication is always manual ----
+            # Existing auto jobs remain readable, but cannot publish a prompt
+            # from a learning run. They stop at the same candidate boundary.
+            # A reviewed candidate has consumed this corpus.  Advance the
+            # cursor and cooldown so the same learning input cannot produce a
+            # stream of duplicate core-Persona proposals while it awaits a
+            # human decision.
             self._advance_success_baseline(job, samples)
             self._finish_run(run_id, RunStatus.SUCCESS)
-            result.update(ok=True, message="已自动发布")
+            result.update(ok=True, message="候选已生成，等待管理员审批")
             return result
 
         except Exception as e:

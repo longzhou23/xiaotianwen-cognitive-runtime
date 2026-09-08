@@ -1,0 +1,33 @@
+{
+  "scope": "bounded manually approved response preferences",
+  "deployed_at_utc": "2026-09-08T01:20:24Z",
+  "runtime_only": true,
+  "config_changed": false,
+  "files": [
+    {
+      "path": "main.py",
+      "before": "0620136ec7fead271160268a52f4d131024cf0fa25f031aa727774c416abfa73",
+      "after": "d81d0c5f0f5515caca7cdc7afcdee7515e90ef0d636a2c2e36b7bb9b2b179f23"
+    },
+    {
+      "path": "iris_memory/core/llm_request_hook.py",
+      "before": "acaded7922ef8c883668e74b84722710db2a5469ee204b850c6d6a19633f0db9",
+      "after": "c0657e221497e956d89f79c4130fc7f4152ccf1fa2a151dc00c82e2ac9d01611"
+    },
+    {
+      "path": "iris_memory/profile/response_preferences.py",
+      "before": "536caad581781fdaa751f0ef634ef39fedcde8defb614959608b55bcce6d3fdc",
+      "after": "c4117eb9d75188a4ae1f8ca0f93c3bb01376a1df9bffe73fc9e9e50bca0850be"
+    },
+    {
+      "path": "iris_memory/profile/storage.py",
+      "before": "726712f7b9f52f323c57ed2d4517028e3c9bd7431efbc80f9b734a6da2725618",
+      "after": "c959d69bfdfa2e7f8dd747ae13c0740af43800654add6c5fd7645ac190717aa7"
+    },
+    {
+      "path": "iris_memory/persona_evolution/service.py",
+      "before": "a9c7743eccdfad84db8929ddd5f6751e6f4639a4bc9d8b8c7096c4e8c1b77d53",
+      "after": "f47147a13a9e8d0cdcc1a2c957f24b2b40f32387e2cb402d95ca87472a385fee"
+    }
+  ]
+}

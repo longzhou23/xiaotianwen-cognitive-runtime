@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -21,7 +24,7 @@ from iris_memory.cognitive.episode_store import (
 )
 from iris_memory.cognitive.iris_adapter import CognitiveRuntime
 from iris_memory.cognitive.outcome import OutcomeKind
-from iris_memory.cognitive.outcome_collector import OutcomeCollector
+from iris_memory.tasks.scheduler import TaskScheduler
 
 
 _NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
@@ -219,3 +222,53 @@ def test_main_episode_observer_wiring_helper(tmp_path, monkeypatch):
     # Avoid cross-test pollution.
     get_cognitive_runtime().episode_observer = None
     reset_cognitive_runtime()
+
+
+@pytest.mark.asyncio
+async def test_main_episode_lifecycle_uses_shared_scheduler_once_and_stops(monkeypatch):
+    import main
+
+    scheduler = TaskScheduler()
+    await scheduler.initialize()
+    config_values = {"episode_lifecycle.auto_finalize": True}
+
+    class _Config:
+        def get(self, key, default=None):
+            return config_values.get(key, default)
+
+    owner = SimpleNamespace(
+        max_episodes_per_scan=7,
+        running=False,
+        run_scheduled_scan=AsyncMock(),
+    )
+    plugin = object.__new__(main.IrisMemoryPlugin)
+    plugin.config = _Config()
+    plugin.component_manager = SimpleNamespace(
+        get_component=lambda name: scheduler if name == "scheduler" else None
+    )
+    plugin._episode_lifecycle_owner = owner
+    plugin._episode_lifecycle_scheduler = None
+    plugin._episode_lifecycle_registered = False
+    monkeypatch.setattr(plugin, "_sync_observatory_runtime_state", lambda: None)
+
+    try:
+        with patch("iris_memory.tasks.scheduler.random.uniform", return_value=1.0):
+            await asyncio.gather(
+                plugin._start_episode_lifecycle_owner(),
+                plugin._start_episode_lifecycle_owner(),
+            )
+
+        assert scheduler.is_task_registered(main.EPISODE_LIFECYCLE_TASK_NAME) is True
+        assert owner.running is False
+        assert list(
+            name
+            for name in scheduler._tasks
+            if name == main.EPISODE_LIFECYCLE_TASK_NAME
+        ) == [main.EPISODE_LIFECYCLE_TASK_NAME]
+
+        config_values["episode_lifecycle.auto_finalize"] = False
+        await plugin._start_episode_lifecycle_owner()
+        assert scheduler.is_task_registered(main.EPISODE_LIFECYCLE_TASK_NAME) is False
+        assert scheduler.is_available is True
+    finally:
+        await scheduler.shutdown()

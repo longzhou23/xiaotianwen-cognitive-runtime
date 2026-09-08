@@ -15,11 +15,11 @@ class TestSchemaJson:
     """_conf_schema.json 合法且 persona_evolution 组齐备"""
 
     def test_schema_is_valid_json(self):
-        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8-sig"))
         assert "persona_evolution" in schema
 
     def test_persona_evolution_group(self):
-        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8-sig"))
         group = schema["persona_evolution"]
         items = group["items"]
         assert set(items) == {
@@ -56,7 +56,7 @@ class TestDefaults:
         """文档 §15.1 的 Job 默认值（隐藏配置）"""
         hidden = Defaults().hidden
         assert hidden.persona_evolution_edit_mode == "managed_block"
-        assert hidden.persona_evolution_approval_mode == "auto"
+        assert hidden.persona_evolution_approval_mode == "manual"
         assert hidden.persona_evolution_trigger_sample_count == 100
         assert hidden.persona_evolution_min_interval_hours == 24
         assert hidden.persona_evolution_manual_min_samples == 20

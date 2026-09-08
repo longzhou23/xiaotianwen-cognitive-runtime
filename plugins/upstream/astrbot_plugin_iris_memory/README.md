@@ -153,8 +153,23 @@ SignalGate 会先根据消息信号、冷却和静音时段进行本地判断。
 /iris_reply reset
 /iris_reply cooldown [分钟]
 /iris_reply willingness [低|中|高]
+/iris_reply interjection [on|off]
 /iris_reply initiate
 ```
+
+受控工具偏好沿用现有人工批准链。用户只能在当前私聊提交候选或撤销自己的记录；候选批准前不会生效：
+
+```text
+/iris_preference request_memory
+/iris_preference status
+/iris_preference revoke
+/iris_mem preference pending
+/iris_mem preference approve <candidate_id>
+/iris_mem preference status
+/iris_mem preference revoke <candidate_id>
+```
+
+`request_memory` 只提交“明确回忆历史时提示已有只读记忆检索”的候选。批准后有效 7 天且不自动续期；本轮明确要求不联网、不要调用工具或不要检索时覆盖该提示。
 
 ## 人格自学习迭代
 

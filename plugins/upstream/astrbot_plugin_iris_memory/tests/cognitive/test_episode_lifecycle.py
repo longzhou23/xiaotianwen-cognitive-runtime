@@ -27,15 +27,23 @@ NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
 ACTOR = EntityReference("person:qq:1", "platform_uid", 1.0, ("qq:1",))
 
 
-def _episode(*, state: EpisodeState = EpisodeState.OPEN, last_activity: datetime = NOW) -> Episode:
+def _episode(
+    *,
+    state: EpisodeState = EpisodeState.OPEN,
+    last_activity: datetime = NOW,
+    episode_id: str = "episode:private:1:root",
+    scope_id: str = "private:1",
+    unresolved_refs: tuple[str, ...] = (),
+) -> Episode:
     return Episode(
-        episode_id="episode:private:1:root",
-        scope_id="private:1",
+        episode_id=episode_id,
+        scope_id=scope_id,
         state=state,
         root_event_id="root",
         opened_at=NOW - timedelta(minutes=30),
         last_activity_at=last_activity,
         participants=(ACTOR,),
+        unresolved_refs=unresolved_refs,
         provenance=("test",),
     )
 
@@ -226,6 +234,62 @@ def test_satisfied_finalized_episode_is_not_completed_again(tmp_path: Path) -> N
     )
     calls: list[tuple[str, tuple]] = []
     _owner(store, calls, satisfied=lambda _episode, _outcomes: True).scan_once(now=NOW)
+    assert calls == []
+
+
+def test_inflight_send_or_tool_never_invents_success_outcome(tmp_path: Path) -> None:
+    episode_id = "episode:private:1:inflight"
+    store = _store(
+        tmp_path,
+        _episode(
+            episode_id=episode_id,
+            last_activity=NOW - timedelta(minutes=20),
+            unresolved_refs=("send:pending", "tool:running"),
+        ),
+    )
+    store.transition_state(
+        episode_id,
+        EpisodeState.SOFT_CLOSED,
+        reason="episode_lifecycle_inactivity",
+        at=NOW - timedelta(minutes=15),
+        preserve_last_activity=True,
+    )
+    calls: list[tuple[str, tuple]] = []
+    _owner(store, calls).scan_once(now=NOW)
+
+    assert store.get_episode(episode_id).state is EpisodeState.FINALIZED
+    assert calls == [(episode_id, ())]
+    assert store.get_finalized_outcomes(episode_id) == ()
+
+
+def test_scan_limit_rotates_until_each_episode_is_checked(tmp_path: Path) -> None:
+    store = AppendOnlyEpisodeStore(tmp_path / "episodes.jsonl")
+    episode_ids = [f"episode:private:1:{index}" for index in range(3)]
+    for episode_id in episode_ids:
+        store.create_episode(
+            _episode(
+                episode_id=episode_id,
+                last_activity=NOW - timedelta(minutes=16),
+            )
+        )
+    calls: list[tuple[str, tuple]] = []
+    owner = EpisodeLifecycleOwnerV1(
+        store,
+        complete_finalized=lambda episode, outcomes: calls.append(
+            (episode.episode_id, outcomes)
+        ),
+        completion_satisfied=lambda _episode, _outcomes: False,
+        max_episodes_per_scan=1,
+    )
+
+    for _ in episode_ids:
+        owner.scan_once(now=NOW)
+
+    assert [episode.episode_id for episode in store.all_episodes()] == episode_ids
+    assert all(
+        store.get_episode(episode_id).state is EpisodeState.SOFT_CLOSED
+        for episode_id in episode_ids
+    )
     assert calls == []
 
 

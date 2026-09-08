@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..contracts import MediaRef, TurnEnvelope
+from ..contracts import ConversationKeyV1, ConversationScope, MediaRef, TurnEnvelope
 from ..contracts.validation import (
     ContractValidationError,
     require_finite_timestamp,
@@ -35,7 +35,15 @@ def _value(value: object, *names: str, default: Any = None) -> Any:
             continue
         if candidate is None:
             continue
-        if callable(candidate) and name in {"get_message_str", "get_sender_id", "get_sender_name"}:
+        if callable(candidate) and name in {
+            "get_message_str",
+            "get_sender_id",
+            "get_sender_name",
+            "get_platform_id",
+            "get_self_id",
+            "get_group_id",
+            "is_private_chat",
+        }:
             try:
                 candidate = candidate()
             except Exception:
@@ -111,21 +119,58 @@ def _message_id(event: object) -> str:
 
 
 def _sender_id(event: object) -> str:
-    raw = _value(event, "sender_id", "user_id")
+    raw = _value(event, "get_sender_id", "sender_id", "user_id")
     if raw is None:
         raw = _nested_value(event, "sender", "user_id", "id")
     return str(raw or "unknown-sender")
 
 
-def _session_id(event: object, sender_id: str) -> str:
-    raw = _value(event, "unified_msg_origin", "session_id", "session")
-    if raw:
-        return str(raw)
+def conversation_key_from_event(event: object, *, sender_id: str | None = None) -> ConversationKeyV1:
+    """Resolve identity from explicit platform fields, never from UMO."""
+
+    # Mapping events are the deliberately permissive replay/test boundary.
+    # Real AstrBot event objects must expose the platform's identity methods;
+    # inventing ``onebot``/platform fallbacks would create a false canonical
+    # identity when an adapter omitted required facts.
+    if not isinstance(event, Mapping):
+        platform_raw = _value(event, "get_platform_id")
+        account_raw = _value(event, "get_self_id")
+        private = _value(event, "is_private_chat")
+        if platform_raw is None or account_raw is None or not isinstance(private, bool):
+            raise ContractValidationError(
+                "real AstrBot events require platform/account/scope identity methods"
+            )
+        platform = str(platform_raw).strip()
+        account = str(account_raw).strip()
+        if not platform or not account:
+            raise ContractValidationError("platform/account identity must be non-empty")
+        if private is False:
+            group_id = _value(event, "get_group_id")
+            if group_id is None or not str(group_id).strip():
+                raise ContractValidationError("group event must include explicit group id")
+            return ConversationKeyV1(platform, account, ConversationScope.GROUP, str(group_id))
+        peer = _value(event, "get_sender_id")
+        if peer is None or not str(peer).strip():
+            raise ContractValidationError("private event must include explicit peer/sender id")
+        return ConversationKeyV1(platform, account, ConversationScope.PRIVATE, str(peer))
+
+    platform = str(
+        _value(event, "platform_id", "platform", "platform_name") or "onebot"
+    )
+    account = str(_value(event, "account_id", "self_id", "bot_id") or platform)
     group_id = _value(event, "group_id")
-    if group_id is not None:
-        return f"group:{group_id}"
-    user_id = _value(event, "user_id", "sender_id") or sender_id
-    return f"private:{user_id}"
+    if group_id is not None and str(group_id).strip():
+        return ConversationKeyV1(platform, account, ConversationScope.GROUP, str(group_id))
+    peer = _value(event, "user_id", "sender_id")
+    if peer is None and sender_id and sender_id != "unknown-sender":
+        peer = sender_id
+    if peer is None or not str(peer).strip():
+        raise ContractValidationError("private event must include explicit peer/sender id")
+    return ConversationKeyV1(platform, account, ConversationScope.PRIVATE, str(peer))
+
+
+def _session_id(event: object, sender_id: str) -> str:
+    return conversation_key_from_event(event, sender_id=sender_id).stable_id
 
 
 def _reply_to(event: object) -> str | None:
@@ -231,6 +276,7 @@ def event_to_envelope(
     sender_id = _sender_id(event)
     message_id = _message_id(event)
     session_id = _session_id(event, sender_id)
+    conversation_key = conversation_key_from_event(event, sender_id=sender_id)
     raw_text = _value(event, "text", "raw_message", "message_str", "get_message_str")
     text = str(raw_text) if raw_text is not None else ""
     segments = _value(event, "message", "messages", "components")
@@ -252,13 +298,20 @@ def event_to_envelope(
         )
     raw_route = _value(event, "route") or route
     raw_trigger = _value(event, "trigger") or trigger or "message"
-    platform = str(_value(event, "platform", "platform_name") or "onebot")
+    platform = conversation_key.platform_id
     metadata = {
         "event_source": platform,
         "message_id": message_id,
-        "is_group": _value(event, "group_id") is not None,
+        "is_group": conversation_key.scope_kind is ConversationScope.GROUP,
         "media_count": len(media),
+        "conversation_key": conversation_key.to_dict(),
     }
+    sender_name = _value(event, "get_sender_name", "sender_name", "nickname")
+    if sender_name is not None and str(sender_name).strip():
+        metadata["sender_name"] = str(sender_name).strip()
+    legacy_umo = _value(event, "unified_msg_origin")
+    if legacy_umo is not None:
+        metadata["legacy_umo"] = str(legacy_umo)
     return TurnEnvelope(
         request_id=_turn_request_id(
             session_id=session_id,

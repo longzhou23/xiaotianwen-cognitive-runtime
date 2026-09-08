@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 OPEN_INACTIVITY = timedelta(minutes=15)
 SOFT_CLOSE_GRACE = timedelta(minutes=15)
 SCAN_INTERVAL_SECONDS = 60
+MAX_EPISODES_PER_SCAN = 100
 
 
 class EpisodeLifecycleOwnerV1:
@@ -36,6 +37,7 @@ class EpisodeLifecycleOwnerV1:
         completion_satisfied: Callable[[Episode, tuple[OutcomeObservation, ...]], bool],
         now: Callable[[], datetime] | None = None,
         scan_interval_seconds: int = SCAN_INTERVAL_SECONDS,
+        max_episodes_per_scan: int = MAX_EPISODES_PER_SCAN,
     ) -> None:
         if not isinstance(store, EpisodeStore):
             raise TypeError("EpisodeLifecycleOwnerV1 requires an EpisodeStore")
@@ -43,11 +45,15 @@ class EpisodeLifecycleOwnerV1:
             raise TypeError("EpisodeLifecycleOwnerV1 requires completion callbacks")
         if type(scan_interval_seconds) is not int or scan_interval_seconds <= 0:
             raise ValueError("scan_interval_seconds must be a positive int")
+        if type(max_episodes_per_scan) is not int or max_episodes_per_scan <= 0:
+            raise ValueError("max_episodes_per_scan must be a positive int")
         self._store = store
         self._complete_finalized = complete_finalized
         self._completion_satisfied = completion_satisfied
         self._now = now or (lambda: datetime.now().astimezone())
         self._scan_interval_seconds = scan_interval_seconds
+        self._max_episodes_per_scan = max_episodes_per_scan
+        self._scan_cursor = 0
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 
@@ -58,6 +64,10 @@ class EpisodeLifecycleOwnerV1:
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def max_episodes_per_scan(self) -> int:
+        return self._max_episodes_per_scan
 
     async def start(self) -> None:
         """Start at most one bounded periodic task; repeated starts are safe."""
@@ -95,10 +105,29 @@ class EpisodeLifecycleOwnerV1:
             except TimeoutError:
                 pass
 
+    async def run_scheduled_scan(self) -> None:
+        """Run one scan when invoked by the shared TaskScheduler.
+
+        The scheduler owns the repeating task in production.  This method is
+        intentionally one pass only, so composing it there cannot create a
+        second lifecycle loop.
+        """
+        self.scan_once()
+
     def scan_once(self, *, now: datetime | None = None) -> None:
         """Perform one deterministic bounded scan over the current store state."""
         scan_time = now or self._now()
-        for episode in self._store.all_episodes():
+        episodes = self._store.all_episodes()
+        if not episodes:
+            self._scan_cursor = 0
+            return
+        start = self._scan_cursor % len(episodes)
+        count = min(self._max_episodes_per_scan, len(episodes))
+        selected = tuple(
+            episodes[(start + offset) % len(episodes)] for offset in range(count)
+        )
+        self._scan_cursor = (start + count) % len(episodes)
+        for episode in selected:
             self._scan_episode(episode, scan_time)
 
     def _scan_episode(self, episode: Episode, now: datetime) -> None:
@@ -165,6 +194,7 @@ class EpisodeLifecycleOwnerV1:
 
 
 __all__ = [
+    "MAX_EPISODES_PER_SCAN",
     "OPEN_INACTIVITY",
     "SCAN_INTERVAL_SECONDS",
     "SOFT_CLOSE_GRACE",

@@ -1,11 +1,11 @@
-from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from iris_memory.cognitive.contracts import Perspective
 from iris_memory.cognitive.iris_adapter import CognitiveRuntime, IrisPostAdapter
 from iris_memory.l2_memory.models import MemoryEntry, MemorySearchResult
 from iris_memory.platform.base import ReplyInfo
-import pytest
 
 
 def test_post_adapter_projects_self_view_without_changing_raw_iris_memory():
@@ -41,6 +41,38 @@ def test_post_adapter_leaves_ambiguous_legacy_assistant_label_unresolved():
     assert view.content == view.raw_content
 
 
+def test_post_adapter_keeps_each_memory_source_visible_in_l2_context():
+    runtime = CognitiveRuntime()
+    entries = (
+        MemoryEntry(
+            id="memory:self",
+            content="小天文曾经组织观测",
+            metadata={"cognitive_runtime": {"subject_entity": "agent:xiaotianwen"}},
+        ),
+        MemoryEntry(
+            id="memory:person",
+            content="龙洲说今晚云很多",
+            metadata={"cognitive_runtime": {"subject_entity": "person:qq:10001"}},
+        ),
+        MemoryEntry(
+            id="memory:group",
+            content="群里一起围观了流星雨",
+            metadata={"cognitive_runtime": {"subject_entity": "group:qq:123"}},
+        ),
+        MemoryEntry(id="memory:legacy", content="旧记录没有可靠主体", metadata={}),
+    )
+
+    rendered = runtime.post_adapter.format_l2_context(
+        MemorySearchResult(entry=entry, score=1.0, distance=0.0) for entry in entries
+    )
+
+    assert "[你的经历] 小天文曾经组织观测" in rendered
+    assert "[他人经历] 龙洲说今晚云很多" in rendered
+    assert "[共同经历] 群里一起围观了流星雨" in rendered
+    assert "[来源未确认] 旧记录没有可靠主体" in rendered
+    assert all(entry.content in rendered for entry in entries)
+
+
 @pytest.mark.parametrize("memory_id", ["l1:runtime-view", "l2:runtime-view", "l3:runtime-view"])
 def test_runtime_projection_contract_is_source_agnostic_and_never_rewrites_raw(memory_id):
     adapter = IrisPostAdapter(CognitiveRuntime().perspective)
@@ -68,7 +100,7 @@ def test_pre_adapter_attaches_structured_metadata_without_rewriting_event_conten
     platform.get_user_id.return_value = "10001"
     platform.get_user_name.return_value = "龙洲"
     platform.get_reply_info.return_value = ReplyInfo()
-    platform.get_mentioned_users.return_value = [("10002", "longz")]
+    platform.get_mentioned_users.return_value = [("10002", "龙洲")]
     platform.get_session_id.return_value = "123"
     platform.is_group_message.return_value = True
 
@@ -78,6 +110,7 @@ def test_pre_adapter_attaches_structured_metadata_without_rewriting_event_conten
     assert event.message_str == "龙洲你看这个"
     assert result.metadata["subject_entity"] == "person:qq:10001"
     assert result.metadata["resolved_entities"] == ("person:qq:10002",)
+    assert result.experience.event.actor != result.experience.event.mentioned_entities[0]
     assert event.set_extra.call_args.args[0] == "iris_cognitive_preprocess"
 
 

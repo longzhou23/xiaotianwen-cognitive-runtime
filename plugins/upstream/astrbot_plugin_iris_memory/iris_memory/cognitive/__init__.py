@@ -43,6 +43,7 @@ from .contracts import (
     Situation,
     SituationFull,
     SituationLite,
+    ShadowStrategyProposal,
     TriggerSnapshot,
     TriggerDecision,
     TraceStage,
@@ -106,7 +107,6 @@ from .review_service import (
     compute_input_snapshot_hash,
     evaluate_review_eligibility,
     model_version_fallback,
-    promote_finding_to_evidence,
     review_episode,
     validate_finding_grounding,
     validate_model_provenance,
@@ -114,6 +114,21 @@ from .review_service import (
 )
 from .review_store import AppendOnlyReviewStore, InMemoryReviewStore
 from .execution_observatory import ExecutionRecordObservatory
+from .response_preference_feedback import (
+    FEEDBACK_EVIDENCE_ACTIVE,
+    FEEDBACK_EVIDENCE_CONFLICTED,
+    FEEDBACK_EVIDENCE_REVOKED,
+    RESPONSE_LENGTH_FEEDBACK_AGGREGATION_BLOCKED_REASON,
+    ResponseLengthFeedbackCandidateV1,
+    ResponseLengthFeedbackAggregateV1,
+    ResponseLengthFeedbackAggregationInputV1,
+    ResponseLengthFeedbackEvaluationV1,
+    ResponseLengthFeedbackReviewObserverV1,
+    aggregate_response_length_feedback,
+    consolidate_response_length_feedback,
+    evaluate_response_length_feedback,
+    is_explicit_length_feedback,
+)
 
 __all__ = [
     "CanonicalEntity",
@@ -154,6 +169,7 @@ __all__ = [
     "Situation",
     "SituationFull",
     "SituationLite",
+    "ShadowStrategyProposal",
     "TriggerSnapshot",
     "TriggerDecision",
     "TraceStage",
@@ -213,7 +229,6 @@ __all__ = [
     "compute_input_snapshot_hash",
     "evaluate_review_eligibility",
     "model_version_fallback",
-    "promote_finding_to_evidence",
     "review_episode",
     "validate_finding_grounding",
     "validate_model_provenance",
@@ -221,4 +236,17 @@ __all__ = [
     "InMemoryReviewStore",
     "AppendOnlyReviewStore",
     "ExecutionRecordObservatory",
+    "FEEDBACK_EVIDENCE_ACTIVE",
+    "FEEDBACK_EVIDENCE_CONFLICTED",
+    "FEEDBACK_EVIDENCE_REVOKED",
+    "RESPONSE_LENGTH_FEEDBACK_AGGREGATION_BLOCKED_REASON",
+    "ResponseLengthFeedbackAggregateV1",
+    "ResponseLengthFeedbackAggregationInputV1",
+    "ResponseLengthFeedbackCandidateV1",
+    "ResponseLengthFeedbackEvaluationV1",
+    "ResponseLengthFeedbackReviewObserverV1",
+    "aggregate_response_length_feedback",
+    "consolidate_response_length_feedback",
+    "evaluate_response_length_feedback",
+    "is_explicit_length_feedback",
 ]

@@ -321,13 +321,121 @@ class P1ObservatoryService:
 
     def _persisted_review(self, episode_id: str) -> dict[str, Any]:
         if self._review_store is None:
-            return {"available": False, "status": "NOT_WIRED", "runs": [], "evidence": []}
+            return {
+                "available": False,
+                "status": "NOT_WIRED",
+                "result_code": "REVIEW_STORE_UNAVAILABLE",
+                "result_reason": "ReviewStore 尚未接入；因此不能判断是否存在 ReviewRun。",
+                "run_count": "Unavailable",
+                "finding_count": "Unavailable",
+                "evidence_count": "Unavailable",
+                "runs": [],
+                "evidence": [],
+            }
         try:
             runs = self._review_store.list_review_runs_for_episode(episode_id)
             evidence = self._review_store.list_evidence_for_episode(episode_id)
         except Exception:
-            return {"available": False, "status": "UNAVAILABLE", "runs": [], "evidence": []}
-        return {"available": True, "status": "AVAILABLE" if runs else "NO_PERSISTED_REVIEW", "runs": _json_value(runs), "evidence": _json_value(evidence)}
+            return {
+                "available": False,
+                "status": "UNAVAILABLE",
+                "result_code": "REVIEW_STORE_UNAVAILABLE",
+                "result_reason": "ReviewStore 读取失败；不能把不可用误报成 0 条记录。",
+                "run_count": "Unavailable",
+                "finding_count": "Unavailable",
+                "evidence_count": "Unavailable",
+                "runs": [],
+                "evidence": [],
+            }
+
+        run_views = [self._review_run_view(run, evidence) for run in runs]
+        finding_count = sum(len(run.findings) for run in runs)
+        evidence_count = len(evidence)
+        result_code, result_reason = self._review_result_explanation(
+            runs=runs,
+            finding_count=finding_count,
+            evidence_count=evidence_count,
+        )
+        return {
+            "available": True,
+            "status": "AVAILABLE" if runs else "NO_PERSISTED_REVIEW",
+            "result_code": result_code,
+            "result_reason": result_reason,
+            "run_count": len(runs),
+            "finding_count": finding_count,
+            "evidence_count": evidence_count,
+            "runs": run_views,
+            "evidence": _json_value(evidence),
+        }
+
+    @classmethod
+    def _review_run_view(cls, run: ReviewRun, evidence: tuple[Any, ...]) -> dict[str, Any]:
+        """Expose one immutable Run with human-readable Finding references.
+
+        This is a detached read projection.  It deliberately keeps the frozen
+        ReviewFinding claim as recorded, while making structural references and
+        the absence of promoted Evidence explicit for a human reader.
+        """
+        run_evidence = tuple(
+            item for item in evidence if item.source_review_run_id == run.review_run_id
+        )
+        findings = []
+        for finding in run.findings:
+            findings.append(
+                {
+                    "finding_id": finding.finding_id,
+                    "episode_id": finding.episode_id,
+                    "review_run_id": finding.review_run_id,
+                    "created_at": _timestamp(finding.created_at),
+                    "dimension": finding.dimension.value,
+                    "finding_type": finding.finding_type.value,
+                    "claim": finding.claim,
+                    "attributed_to": _json_value(finding.attributed_to),
+                    "confidence": finding.confidence.value,
+                    "causal_attribution": finding.causal_attribution.value,
+                    "interpretation_producer": finding.interpretation_producer.value,
+                    "evidence_refs": [
+                        {
+                            "ref_id": ref.ref_id,
+                            "source_type": ref.source_type.value,
+                            "evidence_kind": ref.evidence_kind.value,
+                        }
+                        for ref in finding.evidence_refs
+                    ],
+                }
+            )
+        return {
+            "review_run_id": run.review_run_id,
+            "episode_id": run.episode_id,
+            "created_at": _timestamp(run.created_at),
+            "status": run.status.value,
+            "input_snapshot_hash": run.input_snapshot_hash,
+            "finding_count": len(findings),
+            "findings": findings,
+            "evidence_count": len(run_evidence),
+            "no_evidence_reason": (
+                "Finding 已记录，但没有 ReviewEvidence；当前严格 promotion 条件未满足。"
+                if findings and not run_evidence
+                else None
+            ),
+        }
+
+    def _review_result_explanation(
+        self,
+        *,
+        runs: tuple[ReviewRun, ...],
+        finding_count: int,
+        evidence_count: int,
+    ) -> tuple[str, str]:
+        if not runs:
+            return "NO_RUN", "该 Episode 没有持久化 ReviewRun；不是把结果默认为 0。"
+        if finding_count == 0:
+            return "NO_FINDINGS", "ReviewRun 已存在，但没有生成 Finding。"
+        if evidence_count == 0:
+            if self._runtime_state.get("promotion_enabled") is False:
+                return "PROMOTION_DISABLED", "Finding 已记录；当前 promotion 未启用，因此没有生成 Evidence。"
+            return "FINDINGS_NOT_PROMOTABLE", "Finding 已记录，但没有满足当前严格 promotion 条件的 Evidence。"
+        return "EVIDENCE_AVAILABLE", "ReviewFinding 与已持久化 ReviewEvidence 均可查看。"
 
     def _persisted_archive(self, episode_id: str) -> dict[str, Any]:
         """Project the runtime-owned P2r0 archive without opening another store."""

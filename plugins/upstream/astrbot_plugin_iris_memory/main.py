@@ -43,7 +43,11 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from iris_memory.cognitive.contracts import EventExecutionContext, RuntimeMode
 from iris_memory.cognitive.episode import EpisodeState
-from iris_memory.cognitive.episode_lifecycle import EpisodeLifecycleOwnerV1
+from iris_memory.cognitive.episode_lifecycle import (
+    MAX_EPISODES_PER_SCAN,
+    SCAN_INTERVAL_SECONDS,
+    EpisodeLifecycleOwnerV1,
+)
 from iris_memory.cognitive.episode_shadow import EpisodeShadowObserver
 from iris_memory.cognitive.episode_store import AppendOnlyEpisodeStore
 from iris_memory.cognitive.explicit_correction_rule import (
@@ -64,6 +68,9 @@ from iris_memory.cognitive.reply_link_archive import (
     create_runtime_archive_service,
 )
 from iris_memory.cognitive.reply_link_capture import create_runtime_capture_service
+from iris_memory.cognitive.response_preference_feedback import (
+    ResponseLengthFeedbackReviewObserverV1,
+)
 from iris_memory.cognitive.review_store import AppendOnlyReviewStore
 from iris_memory.cognitive.semantic_evaluator_runtime import (
     EXPECTED_RUNTIME_PROFILE_HASH,
@@ -82,6 +89,7 @@ from iris_memory.commands import (
     L3CommandHandler,
     LearningCommandHandler,
     ProfileCommandHandler,
+    ResponsePreferenceCommandHandler,
     execute_command,
     get_registry,
 )
@@ -101,6 +109,7 @@ from iris_memory.core import (
     set_component_manager,
     shutdown_components,
 )
+from iris_memory.core.llm_request_hook import _has_memory_retrieval_intent
 from iris_memory.extras import ErrorFriendlyProcessor, MarkdownStripper
 from iris_memory.llm import LLMManager
 from iris_memory.llm_modules import proactive_reply_module
@@ -131,6 +140,10 @@ from iris_memory.proactive.state import StateManager
 from iris_memory.proactive.stats import StatsCollector
 from iris_memory.proactive.time_hint import resolve_datetime_reminder
 from iris_memory.proactive.tools import ToolContext
+from iris_memory.profile.response_preferences import (
+    RESPONSE_LENGTH_PARAMETER,
+)
+from iris_memory.profile.storage import ProfileStorage
 from iris_memory.tools import (
     CorrectMemoryTool,
     GetProfileTool,
@@ -144,9 +157,12 @@ from iris_memory.web import register_all_routes
 logger = get_logger("main")
 
 PLUGIN_NAME = "astrbot_plugin_iris_memory"
+EPISODE_LIFECYCLE_TASK_NAME = "episode_lifecycle_scan"
 
-# 旧版（v2.x）数据自动迁移开关；v4 删除本常量与 iris_memory/legacy_migration/ 即彻底移除
-LEGACY_MIGRATION_ENABLED = True
+# Historical writes require a reviewed plan and a separate execution approval.
+# Keep the old v2 migrator available for isolated tests and a future approved
+# maintenance run, but never run it implicitly during normal plugin startup.
+LEGACY_MIGRATION_ENABLED = False
 
 _IRIS_ACTIVE_TIMEOUT = 120
 _UMO_KV_KEY = "iris_reply:group_umo"
@@ -247,10 +263,15 @@ class IrisMemoryPlugin(Star):
             self._p2r0_capture = None
             self._inbound_semantic_authority = None
             self._p2r0_archive = None
+            self._response_length_feedback = ResponseLengthFeedbackReviewObserverV1(
+                Path(self.data_dir) / "cognitive" / "response_length_feedback_observation.v1.jsonl"
+            )
             self._production_review_store = None
             self._production_review_completion = None
             self._production_review_evidence_enabled = False
             self._episode_lifecycle_owner: EpisodeLifecycleOwnerV1 | None = None
+            self._episode_lifecycle_scheduler = None
+            self._episode_lifecycle_registered = False
             self._semantic_evaluator: BoundedSemanticEvaluatorWorkerV1 | None = None
             self._production_semantic_evaluator: str | None = None
             self._semantic_evaluator_requested = False
@@ -323,10 +344,17 @@ class IrisMemoryPlugin(Star):
         """Own and replay the single P2r0 factual capture store for this runtime."""
         try:
             runtime = get_cognitive_runtime()
+            feedback_observer = getattr(self, "_response_length_feedback", None)
+            if feedback_observer is None:
+                feedback_observer = ResponseLengthFeedbackReviewObserverV1(
+                    Path(self.data_dir) / "cognitive" / "response_length_feedback_observation.v1.jsonl"
+                )
+                self._response_length_feedback = feedback_observer
             self._p2r0_capture = create_runtime_capture_service(
                 self.data_dir,
                 runtime,
                 semantic_authority_service=self._semantic_evaluator,
+                feedback_observer=feedback_observer,
             )
             self._inbound_semantic_authority = self._p2r0_capture.semantic_authority_service
             logger.info("P2r0 factual capture enabled")
@@ -442,8 +470,16 @@ class IrisMemoryPlugin(Star):
         if capture is None:
             return
         try:
+            feedback_observer = getattr(self, "_response_length_feedback", None)
+            if feedback_observer is None:
+                feedback_observer = ResponseLengthFeedbackReviewObserverV1(
+                    Path(self.data_dir) / "cognitive" / "response_length_feedback_observation.v1.jsonl"
+                )
+                self._response_length_feedback = feedback_observer
             self._p2r0_archive = create_runtime_archive_service(
-                self.data_dir, capture.store
+                self.data_dir,
+                capture.store,
+                feedback_observer=feedback_observer,
             )
             review_dir = Path(self.data_dir) / "cognitive" / "reviews"
             review_dir.mkdir(parents=True, exist_ok=True)
@@ -473,7 +509,7 @@ class IrisMemoryPlugin(Star):
             runtime.observatory_lifecycle_enabled = bool(
                 self.config.get("episode_lifecycle.auto_finalize", False)
                 and self._episode_lifecycle_owner is not None
-                and self._episode_lifecycle_owner.running
+                and getattr(self, "_episode_lifecycle_registered", False)
             )
             runtime.observatory_review_enabled = bool(
                 self._production_review_store is not None
@@ -494,6 +530,12 @@ class IrisMemoryPlugin(Star):
             runtime.observatory_interaction_trace = getattr(
                 self, "_interaction_trace_observatory", None
             )
+            # L09 remains review-only.  This shared reference lets the
+            # existing admin preference command invoke the explicit L11
+            # consolidator after ProfileStorage is ready; it is not a store.
+            runtime.response_length_feedback_observer = getattr(
+                self, "_response_length_feedback", None
+            )
         except Exception:
             # A missing observability projection must never affect cognition or
             # plugin startup.  Routes will report unavailable state instead.
@@ -505,30 +547,89 @@ class IrisMemoryPlugin(Star):
         if store is None:
             return
         try:
+            max_episodes_per_scan = self.config.get(
+                "episode_lifecycle.max_episodes_per_scan", MAX_EPISODES_PER_SCAN
+            )
+            if (
+                type(max_episodes_per_scan) is not int
+                or max_episodes_per_scan <= 0
+            ):
+                max_episodes_per_scan = MAX_EPISODES_PER_SCAN
             self._episode_lifecycle_owner = EpisodeLifecycleOwnerV1(
                 store,
                 complete_finalized=self._complete_finalized_episode_from_lifecycle,
                 completion_satisfied=self._finalized_episode_completion_satisfied,
+                max_episodes_per_scan=max_episodes_per_scan,
             )
         except Exception:
             self._episode_lifecycle_owner = None
             logger.exception("Episode lifecycle owner unavailable; automatic finalization remains disabled")
 
     async def _start_episode_lifecycle_owner(self) -> None:
-        """Honor the explicit lifecycle config; default is intentionally off."""
+        """Register one scan with the shared TaskScheduler when explicitly enabled."""
         enabled = self.config.get("episode_lifecycle.auto_finalize", False)
         owner = self._episode_lifecycle_owner
         if type(enabled) is not bool or not enabled or owner is None:
+            await self._stop_episode_lifecycle_task()
             self._sync_observatory_runtime_state()
             logger.info("Episode lifecycle automatic finalization disabled by configuration")
             return
+        manager = getattr(self, "component_manager", None)
+        scheduler = (
+            manager.get_component("scheduler") if manager is not None else None
+        )
+        if (
+            scheduler is None
+            or not scheduler.is_available
+            or not callable(getattr(scheduler, "register_periodic_task", None))
+            or not callable(getattr(scheduler, "is_task_registered", None))
+        ):
+            await self._stop_episode_lifecycle_task()
+            self._sync_observatory_runtime_state()
+            logger.warning(
+                "TaskScheduler 不可用，Episode lifecycle automatic finalization remains disabled"
+            )
+            return
         try:
-            await owner.start()
+            if not scheduler.is_task_registered(EPISODE_LIFECYCLE_TASK_NAME):
+                scheduler.register_periodic_task(
+                    task_name=EPISODE_LIFECYCLE_TASK_NAME,
+                    coro_func=owner.run_scheduled_scan,
+                    interval_hours=SCAN_INTERVAL_SECONDS / 3600,
+                )
+            self._episode_lifecycle_scheduler = scheduler
+            self._episode_lifecycle_registered = True
             self._sync_observatory_runtime_state()
-            logger.info("Episode lifecycle owner started (60-second bounded scan)")
+            logger.info(
+                "Episode lifecycle scan registered with TaskScheduler "
+                f"({SCAN_INTERVAL_SECONDS}-second interval, "
+                f"max {owner.max_episodes_per_scan} Episodes per pass)"
+            )
         except Exception:
+            self._episode_lifecycle_scheduler = None
+            self._episode_lifecycle_registered = False
             self._sync_observatory_runtime_state()
-            logger.exception("Episode lifecycle owner failed to start; automatic finalization disabled")
+            logger.exception(
+                "Episode lifecycle scheduler registration failed; automatic finalization disabled"
+            )
+
+    async def _stop_episode_lifecycle_task(self) -> None:
+        scheduler = getattr(self, "_episode_lifecycle_scheduler", None)
+        registered = getattr(self, "_episode_lifecycle_registered", False)
+        try:
+            if scheduler is not None:
+                unregister = getattr(scheduler, "unregister_task", None)
+                is_registered = getattr(scheduler, "is_task_registered", None)
+                if callable(unregister) and (
+                    registered
+                    or (callable(is_registered) and is_registered(EPISODE_LIFECYCLE_TASK_NAME))
+                ):
+                    await unregister(EPISODE_LIFECYCLE_TASK_NAME)
+        except Exception:
+            logger.exception("Episode lifecycle scheduler task shutdown failed")
+        finally:
+            self._episode_lifecycle_scheduler = None
+            self._episode_lifecycle_registered = False
 
     def _complete_finalized_episode_from_lifecycle(self, episode, outcomes):
         coordinator = self._production_review_completion
@@ -682,6 +783,7 @@ class IrisMemoryPlugin(Star):
                 AllCommandHandler(),
                 LearningCommandHandler(),
                 EvolutionCommandHandler(),
+                ResponsePreferenceCommandHandler(),
             ]
             for handler in handlers:
                 registry.register(handler)
@@ -720,15 +822,16 @@ class IrisMemoryPlugin(Star):
         self._init_p2r0_capture_service()
         self._init_p2r0_archive_service()
         self._init_episode_lifecycle_owner()
-        await self._start_episode_lifecycle_owner()
 
         # 1. 记忆组件初始化
         try:
             await initialize_components(self.component_manager)
         except Exception as e:
             logger.error(f"记忆组件初始化失败：{e}", exc_info=True)
+        await self._start_episode_lifecycle_owner()
 
-        # 2. 旧版（v2.x）数据自动迁移（独立模块，失败不阻断启动）
+        # 2. Historical migration is disabled by default.  A future approved
+        # maintenance run must provide an explicit plan, backup and scope.
         if LEGACY_MIGRATION_ENABLED:
             try:
                 from iris_memory.legacy_migration import migrate_if_needed
@@ -789,9 +892,12 @@ class IrisMemoryPlugin(Star):
             logger.debug("interaction trace observability cleanup skipped", exc_info=True)
         if interaction_trace is not None:
             interaction_trace.close()
+        await self._stop_episode_lifecycle_task()
         if self._episode_lifecycle_owner is not None:
-            await self._episode_lifecycle_owner.shutdown()
+            if self._episode_lifecycle_owner.running:
+                await self._episode_lifecycle_owner.shutdown()
             self._episode_lifecycle_owner = None
+        self._sync_observatory_runtime_state()
         if self._semantic_evaluator is not None:
             try:
                 await self._semantic_evaluator.shutdown()
@@ -878,6 +984,43 @@ class IrisMemoryPlugin(Star):
             event.set_result("无法获取群ID")
             return None
         return group_id
+
+    def _get_response_preference_storage(self) -> ProfileStorage | None:
+        """Return the sole response-preference owner when profile KV is ready."""
+
+        manager = getattr(self, "component_manager", None)
+        if manager is None:
+            return None
+        try:
+            storage = manager.get_component("profile", ProfileStorage)
+        except Exception:
+            return None
+        return storage if storage is not None and storage.is_available else None
+
+    async def _capture_explicit_response_preference(self, event: AstrMessageEvent) -> None:
+        """Propose fixed direct requests through the bounded ProfileStorage path."""
+
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            return
+        try:
+            result = await storage.request_explicit_response_preference(event)
+        except Exception as exc:  # noqa: BLE001 - proposal capture cannot control host
+            logger.warning("自然语言回复偏好候选捕获失败，已停止：%s", exc)
+            return
+        if result.code in {"pending", "duplicate"}:
+            logger.info("已捕获回复表达偏好候选（状态=%s）", result.code)
+        elif result.code not in {"not_explicit", "indirect_source", "invalid_scope"}:
+            logger.debug("回复表达偏好候选未创建（原因=%s）", result.code)
+        try:
+            relationship = await storage.request_explicit_relationship_familiarity(event)
+        except Exception as exc:  # noqa: BLE001 - proposal capture cannot control host
+            logger.warning("自然语言关系候选捕获失败，已停止：%s", exc)
+            return
+        if relationship.code in {"pending", "duplicate"}:
+            logger.info("已捕获范围限定的熟悉度候选（状态=%s）", relationship.code)
+        elif relationship.code not in {"not_explicit", "indirect_source", "invalid_scope"}:
+            logger.debug("熟悉度候选未创建（原因=%s）", relationship.code)
 
     async def _get_provider_id(self, event, preferred: str = "") -> str | None:
         if preferred:
@@ -1053,6 +1196,32 @@ class IrisMemoryPlugin(Star):
         await self._state.save_dirty(self._kv_save)
         event.set_result(msg)
 
+    @iris_reply_group.command("interjection")
+    async def cmd_interjection(self, event, mode: str = "") -> None:
+        """Configure the frozen group-only no-uninvited-interjection policy."""
+
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return
+        if not mode.strip():
+            enabled = self._admin.get_no_uninvited_interjection(group_id)
+            state = "开启" if enabled else "关闭"
+            event.set_result(
+                f"群 {group_id} 禁止无邀请插话策略: {state}\n可选: on/off"
+            )
+            return
+        normalized_mode = mode.strip().casefold()
+        if normalized_mode not in {"on", "off"}:
+            event.set_result("无效的插话策略开关: 可选 on/off")
+            return
+        msg = self._admin.set_no_uninvited_interjection(group_id, normalized_mode)
+        failed_keys = await self._state.save_dirty(self._kv_save)
+        required_keys = {"iris_reply:group_ids", f"state:{group_id}"}
+        if failed_keys & required_keys:
+            event.set_result(f"⚠️ {msg}，但持久化失败；重启后可能恢复旧状态")
+            return
+        event.set_result(msg)
+
     @iris_reply_group.command("initiate")
     async def cmd_initiate(self, event) -> None:
         group_id = self._get_group_id(event)
@@ -1060,6 +1229,123 @@ class IrisMemoryPlugin(Star):
             return
         result = await self._proactive.attempt_initiate(group_id, force=True)
         event.set_result(f"主动发起: {result}")
+
+    # ========================================================================
+    # 受控回复表达偏好：用户请求/自查/自撤销
+    # ========================================================================
+
+    @filter.command_group("iris_preference")
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    def iris_preference_group(self):
+        """用户只能在当前私聊提交候选或撤销自己的偏好。"""
+        pass
+
+    @iris_preference_group.command("request")
+    async def cmd_response_preference_request(
+        self, event: AstrMessageEvent, response_expansion: str = ""
+    ) -> None:
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            event.set_result("❌ 回复表达偏好存储不可用（需要启用 profile）")
+            return
+        result = await storage.request_response_preference(event, response_expansion)
+        messages = {
+            "pending": "✅ 已记录为待人工核实候选；尚未批准，不会改变后续请求",
+            "duplicate": "ℹ️ 该来源已处理，未新增候选、未延长期限",
+            "invalid_scope": "❌ 只接受有完整平台实例、bot账号、用户和私聊身份的当前私聊",
+            "missing_source": "❌ 当前事件没有可信平台消息 ID，未创建候选",
+            "invalid_value": "❌ response_expansion 只能使用 DEFAULT 或 CONCLUSION_FIRST",
+            "invalid_parameter": "❌ 不支持这个回复表达参数",
+            "write_failed": "❌ 持久化失败，未回报候选创建成功",
+            "unavailable": "❌ 回复表达偏好存储不可用",
+        }
+        event.set_result(messages.get(result.code, f"❌ 请求失败（{result.code}）"))
+
+    @iris_preference_group.command("request_length")
+    async def cmd_response_preference_length(
+        self, event: AstrMessageEvent, response_length: str = ""
+    ) -> None:
+        """Submit the independent response length candidate."""
+
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            event.set_result("❌ 回复表达偏好存储不可用（需要启用 profile）")
+            return
+        result = await storage.request_response_preference(
+            event,
+            response_length,
+            parameter=RESPONSE_LENGTH_PARAMETER,
+        )
+        messages = {
+            "pending": "✅ 已记录为待人工核实的简短回答候选；尚未批准，不会改变后续请求",
+            "duplicate": "ℹ️ 该来源已处理，未新增候选、未延长期限",
+            "invalid_scope": "❌ 只接受有完整平台实例、bot账号、用户和私聊身份的当前私聊",
+            "missing_source": "❌ 当前事件没有可信平台消息 ID，未创建候选",
+            "invalid_value": "❌ response_length 只能使用 DEFAULT 或 SHORT",
+            "invalid_parameter": "❌ 不支持这个回复表达参数",
+            "write_failed": "❌ 持久化失败，未回报候选创建成功",
+            "unavailable": "❌ 回复表达偏好存储不可用",
+        }
+        event.set_result(messages.get(result.code, f"❌ 请求失败（{result.code}）"))
+
+    @iris_preference_group.command("request_memory")
+    async def cmd_memory_retrieval_preference(self, event: AstrMessageEvent) -> None:
+        """Submit the explicit private memory-retrieval candidate."""
+
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            event.set_result("❌ 回复表达偏好存储不可用（需要启用 profile）")
+            return
+        result = await storage.request_memory_retrieval_preference(event)
+        messages = {
+            "pending": "✅ 已记录为待人工核实的历史记忆检索候选；尚未批准，不会改变工具调用",
+            "duplicate": "ℹ️ 该来源已处理，未新增候选、未延长期限",
+            "invalid_scope": "❌ 只接受有完整平台实例、bot账号、用户和私聊身份的当前私聊",
+            "missing_source": "❌ 当前事件没有可信平台消息 ID，未创建候选",
+            "indirect_source": "❌ 引用/转发内容不能作为当前用户的直接偏好请求",
+            "write_failed": "❌ 持久化失败，未回报候选创建成功",
+            "unavailable": "❌ 回复表达偏好存储不可用",
+        }
+        event.set_result(messages.get(result.code, f"❌ 请求失败（{result.code}）"))
+
+    @iris_preference_group.command("status")
+    async def cmd_response_preference_status(self, event: AstrMessageEvent) -> None:
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            event.set_result("❌ 回复表达偏好存储不可用（需要启用 profile）")
+            return
+        records = await storage.response_preference_records_for_event(event)
+        if records is None:
+            event.set_result("❌ 当前私聊身份或偏好存储不可用，未读取到状态")
+            return
+        now = time.time()
+        lines = ["📌 当前私聊回复表达偏好（批准后 7 天；不自动续期；可恢复默认）"]
+        if not records:
+            lines.append("（无记录，使用默认表达方式）")
+        else:
+            for record in records:
+                expires = "—" if record.expires_at is None else str(int(record.expires_at))
+                lines.append(
+                    f"{record.candidate_id} | {record.display_status(now)} | "
+                    f"{record.parameter}={record.value} | expires_at={expires}"
+                )
+        event.set_result("\n".join(lines))
+
+    @iris_preference_group.command("revoke")
+    async def cmd_response_preference_revoke(self, event: AstrMessageEvent) -> None:
+        storage = self._get_response_preference_storage()
+        if storage is None:
+            event.set_result("❌ 回复表达偏好存储不可用（需要启用 profile）")
+            return
+        result = await storage.revoke_response_preferences_for_event(event)
+        messages = {
+            "revoked": f"✅ 已撤销当前私聊的 {result.affected} 条偏好记录，后续请求恢复默认表达",
+            "nothing_to_revoke": "ℹ️ 当前私聊没有可撤销的待处理或已批准偏好",
+            "invalid_scope": "❌ 当前私聊身份不完整，不能执行撤销",
+            "write_failed": "❌ 持久化失败，未回报撤销成功",
+            "unavailable": "❌ 回复表达偏好存储不可用",
+        }
+        event.set_result(messages.get(result.code, f"❌ 撤销失败（{result.code}）"))
 
     # ========================================================================
     # AstrBot 钩子
@@ -1127,6 +1413,20 @@ class IrisMemoryPlugin(Star):
         if not motive:
             return
 
+        # D05's group policy is owned by StateManager and only suppresses
+        # uninvited sampling.  Anchor follow-up remains an invited path; the
+        # existing passive @/wake path returned above is untouched.
+        if (
+            self._state.get_no_uninvited_interjection(group_id)
+            and motive != "follow_up"
+        ):
+            logger.debug(
+                "Iris Reply: group policy suppressed uninvited %s for group %s",
+                motive,
+                group_id,
+            )
+            return
+
         is_follow_up = motive == "follow_up"
 
         if is_follow_up:
@@ -1179,6 +1479,9 @@ class IrisMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent) -> None:
         """记忆侧：全类型消息入 L1 缓冲、图片入队"""
+        # This proposal path accepts one deterministic direct phrase, persists
+        # PENDING only, and never changes the current request.
+        await self._capture_explicit_response_preference(event)
         # P2x.1 passive trace: no await, no event mutation, no re-dispatch.
         try:
             self._interaction_trace.observe_inbound(event)
@@ -1278,7 +1581,6 @@ class IrisMemoryPlugin(Star):
                 runtime_mode=runtime.runtime_mode,
             )
             prepared = runtime.pre_adapter.attach(event)
-            runtime.behavior.observe(prepared.experience)
             legacy = await LegacyIrisProactiveSignalAdapter(self._state).read_consistent(event)
             result = runtime.run_behavior(
                 prepared.experience, legacy, runtime_mode=context.runtime_mode
@@ -1296,6 +1598,19 @@ class IrisMemoryPlugin(Star):
             return False
 
         event.set_extra("iris_cognitive_behavior_result", result)
+        # Fifth-batch strategy previews are diagnostic only.  The existing
+        # request Hook and Trigger/Participation owners retain all authority.
+        current_text = str(getattr(event, "message_str", "") or "")
+        event.set_extra(
+            "iris_cognitive_strategy_shadow",
+            {
+                "tool": runtime.behavior.shadow_tool_preference(
+                    result,
+                    explicit_memory_retrieval=_has_memory_retrieval_intent(current_text),
+                ),
+                "reply_timing": runtime.behavior.shadow_reply_timing_preference(result),
+            },
+        )
         if runtime.should_guard_block(result):
             try:
                 record = runtime.record_guard_block(result)

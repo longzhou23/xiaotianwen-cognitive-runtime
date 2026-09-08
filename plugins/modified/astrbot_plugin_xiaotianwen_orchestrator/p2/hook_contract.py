@@ -8,11 +8,14 @@ P1 isolated AstrBot gate.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
-from ..contracts.validation import ContractValidationError, require_non_empty_string, require_source_name
-
+from ..contracts.validation import (
+    ContractValidationError,
+    require_non_empty_string,
+    require_source_name,
+)
 
 _ROLES = frozenset({
     "context_provider",
@@ -82,10 +85,20 @@ def default_hook_contracts() -> tuple[HookContract, ...]:
             writes=("ContextAssemblyResult",), effects=("context",), scope="isolated",
         ),
         HookContract(
+            "xiaotianwen_orchestrator", "conversation_context_owner", -5, "context_provider",
+            reads=("ConversationKeyV1", "ConversationLedgerV1", "current TurnEnvelope"),
+            writes=("conversation_history ContextSection", "event owner marker"), effects=("context",), scope="isolated",
+        ),
+        HookContract(
+            "xiaotianwen_orchestrator", "after_message_sent", "default", "lifecycle",
+            reads=("Host clean/reset markers", "ConversationKeyV1"),
+            writes=("short-term ledger and assembler state",), effects=("context",), scope="isolated",
+        ),
+        HookContract(
             "astrbot_plugin_context_aware", "on_llm_request", -10, "context_provider",
             reads=("ProviderRequest.contexts", "ProviderRequest.prompt", "event extras"),
             writes=("ProviderRequest.contexts", "ProviderRequest.extra_user_content_parts", "ProviderRequest.image_urls"),
-            effects=("context", "model_call"),
+            effects=("context", "model_call"), enabled=False, scope="migration",
         ),
         HookContract(
             "astrbot_plugin_image_context_pool", "on_llm_request", -20, "context_provider",

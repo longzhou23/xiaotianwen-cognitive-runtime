@@ -29,3 +29,16 @@ class AdminCommands:
     def get_willingness(self, group_id: str) -> str:
         level = self._state.get_willingness(group_id)
         return display_level(level)
+
+    def get_no_uninvited_interjection(self, group_id: str) -> bool:
+        return self._state.get_no_uninvited_interjection(group_id)
+
+    def set_no_uninvited_interjection(self, group_id: str, raw_mode: str) -> str:
+        normalized = raw_mode.strip().casefold()
+        if normalized not in {"on", "off"}:
+            return "无效的插话策略开关: 可选 on/off"
+        enabled = normalized == "on"
+        self._state.set_no_uninvited_interjection(group_id, enabled)
+        return (
+            f"群 {group_id} 已{('开启' if enabled else '关闭')}禁止无邀请插话策略"
+        )

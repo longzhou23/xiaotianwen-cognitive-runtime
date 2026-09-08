@@ -861,9 +861,9 @@ class HiddenConfig:
         },
     )
     persona_evolution_approval_mode: str = field(
-        default="auto",
+        default="manual",
         metadata={
-            "description": "新建 Job 默认审批模式（auto 自动发布 / manual 手动审批）",
+            "description": "新建 Job 默认审批模式（manual 仅生成候选；核心 Persona 不自动发布）",
             "group": "人格自迭代",
         },
     )

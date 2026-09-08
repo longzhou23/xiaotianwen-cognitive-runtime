@@ -191,6 +191,56 @@ xiaotianwen/
 5. 工具结果先以内部资料进入上下文；最终内容仍须经 persona、输出审核和分段处理。
 6. 主回复、预判断、后台记忆任务和工具调用必须有明确会话键、幂等键和失败回退。
 
+## 受控回复表达偏好（T10–T15）
+
+当前版本提供一个范围极小、默认关闭、需要维护者人工核实的表达顺序试验。它只支持 `response_expansion` 的两个固定值：`CONCLUSION_FIRST`（先给直接结论，再按当前问题需要补充）和 `DEFAULT`（默认表达方式）。它不是字符/token 上限，也不会截断必要条件、错误、工具结果或步骤；不会改变是否回复、工具选择、发送时机、检索量、权限、情绪、关系或 Persona。没有真实生产样例时，下面的流程只在本地 fixture 中演示，不能据此声称线上已生效。
+
+### 用户侧受控操作
+
+以下操作只在当前私聊中工作，身份必须同时包含平台实例、bot 账号、发送者稳定 UID、私聊会话和可信消息 ID；群聊、缺失字段或合成事件会 fail-closed。
+
+```text
+/iris_preference request CONCLUSION_FIRST  # 创建待人工核实候选，不立即生效
+/iris_preference request DEFAULT           # 仅允许的另一固定值；恢复默认更建议使用 revoke
+/iris_preference status                    # 查看当前私聊的记录状态
+/iris_preference revoke                    # 撤销当前私聊自己的待处理/已批准偏好
+```
+
+普通消息、纠正、含糊质疑、第三方转述、情绪或 `favorability` 不会自动创建偏好；“这次请详细解释……”只作为本轮覆盖，不能写入长期状态。撤销后使用当时的默认表达方式，不回写画像字段 `communication_style`。
+
+### 维护者核实与管理
+
+现有管理员命令链提供最小人工入口：
+
+```text
+/iris_mem preference pending                    # 待人工核实候选
+/iris_mem preference status                     # 全部记录：有效/过期/撤销/冲突暂停
+/iris_mem preference approve rspref:<candidate> # 批准一个已核实的候选
+/iris_mem preference revoke rspref:<candidate>  # 撤销一个候选或已批准记录
+```
+
+批准命令沿用 `iris_mem` 的 AstrBot 管理员权限保护，普通用户、模型调用和伪造角色不能批准。候选 ID、scope 和来源由系统生成；`status` 中的 `source=平台实例:消息ID` 必须由维护者对照实际入站消息及用户身份核实。没有可核验的真实来源时不要批准，也不要用正文、时间邻近、相似度或日志猜测补全来源。批准后只在同一处私聊有效 7 天且不自动续期；重复同一来源不新增、不延期；相反要求会暂停旧值并等待人工处理。
+
+### 最终 ProviderRequest 的脱敏示例
+
+偏好未批准、已过期、已撤销、scope 不匹配或存储读取失败时，最终请求不含该临时 section：
+
+```text
+extra_user_content_parts = [已有的临时上下文]
+```
+
+本地 fixture 中批准且 scope 匹配时，只追加一个受控、非权威的临时 `TextPart`：
+
+```text
+extra_user_content_parts = [已有的临时上下文,
+  <iris:response_style_preference>
+  先给直接结论，再按当前问题需要补充说明；用户本轮明确要求详细时完整展开。
+  这不改变工具、权限、情绪、关系或角色，也不保证模型一定按此输出。
+  </iris:response_style_preference>]
+```
+
+重复预处理会先移除旧 marker 再最多追加一个；本轮明确详细要求会移除该 marker，让本轮要求优先。该 section 的唯一保存 owner 是 `plugins/upstream/astrbot_plugin_iris_memory/iris_memory/profile/storage.py::ProfileStorage`，唯一请求读取/注入点是 `core/llm_request_hook.py::preprocess_llm_request()` → `_collect_response_preference()` → `_inject_to_extra_user_content_parts()`；Observatory 仍只读。
+
 ## 新机快速部署
 
 目标环境：**Ubuntu 24.04 x64**。部署前请准备：
@@ -305,6 +355,8 @@ SnowLuma / QQ 入口
 | Iris 人格自迭代提示路由不存在 | 检查 Plugin Page 路由格式是否兼容 AstrBot，刷新前端并核对重启后的路由注册日志 |
 
 ## 文档导航
+
+[记忆演化：当前交付、备忘录对照与未完成项](docs/memory-evolution/README.md)集中记录本地源码、生产补丁和冻结边界。
 
 | 文档 | 内容 |
 |---|---|

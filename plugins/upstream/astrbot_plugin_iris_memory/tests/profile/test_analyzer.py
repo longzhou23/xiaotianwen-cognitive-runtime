@@ -107,7 +107,7 @@ class TestProfileAnalyzer:
         assert "技术" in prompt
 
     def test_build_user_analysis_prompt(self, analyzer):
-        """测试构建用户分析 prompt"""
+        """画像 prompt 仅处理可核实偏好，不要求模型判断性格。"""
         messages = ["用户消息1", "用户消息2"]
         current_profile = {"personality_tags": ["外向"]}
 
@@ -116,7 +116,8 @@ class TestProfileAnalyzer:
         assert "用户画像特征" in prompt
         assert "用户消息1" in prompt
         assert "用户消息2" in prompt
-        assert "外向" in prompt
+        assert "外向" not in prompt
+        assert "personality_tags" not in prompt
 
     @pytest.mark.asyncio
     async def test_group_analysis_truncates_to_newest_messages(

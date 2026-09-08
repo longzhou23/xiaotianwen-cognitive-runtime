@@ -99,7 +99,9 @@ def _load_new_schema_defaults() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {}
     schema_path = Path(__file__).resolve().parents[2] / "_conf_schema.json"
     try:
-        with open(schema_path, "r", encoding="utf-8") as f:
+        # The checked-in schema is UTF-8 with BOM on Windows.  Read it as
+        # UTF-8-SIG so current user-visible defaults remain authoritative.
+        with open(schema_path, "r", encoding="utf-8-sig") as f:
             schema = json.load(f)
         for section, body in schema.items():
             if not isinstance(body, dict):

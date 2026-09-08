@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Iterable, Mapping, Protocol, runtime_checkable
 from uuid import uuid4
 
 from .contracts import BehaviorExecutionRecord, BehaviorTrace, TraceStage
@@ -621,14 +621,6 @@ def promote_finding_to_evidence(
 # ---------------------------------------------------------------------------
 
 
-def _default_scope(episode: Episode) -> BehaviorScope:
-    return BehaviorScope(
-        channel=episode.scope_id,
-        directedness="directed" if episode.participants else "unknown",
-        topic_hint=episode.topic_hint,
-    )
-
-
 def _bind_candidate_to_authoritative_review(
     finding: ReviewFinding,
     *,
@@ -655,18 +647,17 @@ def review_episode(
     fact_envelopes: Mapping[tuple[EvidenceSourceType, str], object] | None = None,
     deterministic_engine: DeterministicReviewEngine | None = None,
     model_engine: StructuredModelReviewEngine | None = None,
-    scope_factory: Callable[[Episode, ReviewFinding], BehaviorScope] | None = None,
     producer: str = "review_orchestrator",
     review_run_id: str | None = None,
     created_at: datetime | None = None,
 ) -> ReviewRun | None:
-    """Run one offline/manual shadow Review for a single Episode.
+    """Create the ReviewRun for one eligible Episode.
 
     Returns ``None`` when eligibility is SKIP/DEFER.  Otherwise persists one
-    immutable ReviewRun.  ReviewEvidence production is disabled and fail-closed
-    pending an explicitly frozen promotion contract.  This is deliberately an
-    explicit/offline call: it never blocks current-turn Host execution and never
-    mutates Episode/Iris.
+    immutable ReviewRun. Evidence promotion belongs to the separately configured
+    production completion path; this function never promotes Findings itself.
+    Both production completion and request-local Preview use this machinery.
+    It never mutates Episode/Iris.
     """
     outcome_tuple = tuple(outcomes)
     decision = evaluate_review_eligibility(episode, outcome_tuple)
@@ -735,7 +726,5 @@ def review_episode(
     )
     store.record_review_run(run)
 
-    # Review interpretation and Finding persistence are active.  Production
-    # ReviewEvidence is intentionally disabled/fail-closed in P1d.2; no caller
-    # supplied engine or producer label can cross this boundary.
+    # The completion coordinator owns any subsequent archive/promotion work.
     return run

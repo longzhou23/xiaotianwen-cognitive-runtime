@@ -136,7 +136,11 @@ class ProductionReviewCompletionCoordinator:
             return None
 
     def completion_satisfied(
-        self, episode: Any, outcomes: tuple[Any, ...] | list[Any] = ()
+        self,
+        episode: Any,
+        outcomes: tuple[Any, ...] | list[Any] = (),
+        *,
+        fact_envelopes: Mapping[tuple[Any, str], object] | None = None,
     ) -> bool:
         """Check the immutable completion chain without producing new state."""
         from .episode import Episode, EpisodeState
@@ -150,8 +154,9 @@ class ProductionReviewCompletionCoordinator:
         if evaluate_review_eligibility(episode, outcome_tuple).decision.value != "REVIEW":
             return True
         try:
-            snapshot = ReviewInputSnapshot(episode, outcome_tuple, {})
-            input_hash = compute_input_snapshot_hash(episode, outcome_tuple, {})
+            supplied_facts = fact_envelopes or {}
+            snapshot = ReviewInputSnapshot(episode, outcome_tuple, supplied_facts)
+            input_hash = compute_input_snapshot_hash(episode, outcome_tuple, supplied_facts)
             run_id = f"run:production:{input_hash.removeprefix('sha256:')}"
             run = self._review_store.get_review_run(run_id)
             if run is None or run.episode_id != episode.episode_id or run.input_snapshot_hash != input_hash:
@@ -278,13 +283,26 @@ class P2r0HistoricalArchiveService:
 
     owner = "P2r0 Historical Archive Wiring"
 
-    def __init__(self, p2_store: P2PromotionStore, p2r0_store: P2r0Store) -> None:
+    def __init__(
+        self,
+        p2_store: P2PromotionStore,
+        p2r0_store: P2r0Store,
+        feedback_observer: object | None = None,
+    ) -> None:
         if type(p2_store) is not P2PromotionStore:
             raise HistoricalArchiveWiringError("archive wiring requires production P2PromotionStore")
         if type(p2r0_store) is not P2r0Store:
             raise HistoricalArchiveWiringError("archive wiring requires authoritative P2r0Store")
         self._p2_store = p2_store
         self._p2r0_store = p2r0_store
+        self._feedback_observer = feedback_observer
+        if feedback_observer is not None:
+            observe_archive = getattr(feedback_observer, "observe_archive", None)
+            if not callable(observe_archive):
+                raise TypeError("feedback observer requires observe_archive")
+            bind_archive_store = getattr(feedback_observer, "bind_archive_store", None)
+            if callable(bind_archive_store):
+                bind_archive_store(p2r0_store)
         self._encoder = P2CanonicalArtifactEncoderV1(default_encoding_profile_v1())
         # Profile registration is append-only and idempotent; it establishes
         # the exact profile before any ReviewRun/snapshot can be committed.
@@ -362,20 +380,41 @@ class P2r0HistoricalArchiveService:
             existing = tuple(item for item in self._p2r0_store.archives if item.review_run_id == p2_run.run.review_run_id)
             if existing:
                 if len(existing) == 1 and existing[0] == archive:
+                    self._observe_feedback_archive(existing[0])
                     return existing[0]
                 raise HistoricalArchiveWiringError("immutable archive already exists with different facts")
             self._p2r0_store.record_archive(archive, authoritative_p2_run=p2_run)
+            self._observe_feedback_archive(archive)
             return archive
         except Exception as exc:  # noqa: BLE001 - archive is observational and fail-closed
             logger.warning("P2r0 historical archive unavailable: %s", exc)
             return None
 
+    def _observe_feedback_archive(self, archive: P2rReplyLinkFactArchiveV1) -> None:
+        """Notify the optional review-only L09 adapter after archive commit."""
 
-def create_runtime_archive_service(data_dir: str | Path, p2r0_store: P2r0Store) -> P2r0HistoricalArchiveService:
+        observer = self._feedback_observer
+        if observer is None:
+            return
+        try:
+            observer.observe_archive(archive)
+        except Exception as exc:  # noqa: BLE001 - review observation never blocks archive
+            logger.warning("L09 response-length feedback observation rejected: %s", exc)
+
+
+def create_runtime_archive_service(
+    data_dir: str | Path,
+    p2r0_store: P2r0Store,
+    feedback_observer: object | None = None,
+) -> P2r0HistoricalArchiveService:
     """Create the one production-owned P2 store for a plugin runtime."""
     root = Path(data_dir) / "cognitive" / "p2a-review-runs"
     root.mkdir(parents=True, exist_ok=True)
-    return P2r0HistoricalArchiveService(P2PromotionStore(root / "promotion.jsonl"), p2r0_store)
+    return P2r0HistoricalArchiveService(
+        P2PromotionStore(root / "promotion.jsonl"),
+        p2r0_store,
+        feedback_observer=feedback_observer,
+    )
 
 
 # Concise aliases for runtime composition and future explicit lifecycle callers.

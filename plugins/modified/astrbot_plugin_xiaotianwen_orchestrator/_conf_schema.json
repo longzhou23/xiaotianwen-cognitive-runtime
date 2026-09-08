@@ -9,6 +9,37 @@
     "type": "bool",
     "default": false
   },
+  "conversation_ledger_enabled": {
+    "description": "启用编排器拥有的短期对话 Ledger（默认关闭，P2x.3 仅显式接入）",
+    "type": "bool",
+    "default": false
+  },
+  "conversation_runtime_enabled": {
+    "description": "启用实际 Conversation→TurnAssembler→Ledger→ContextBridge hook（默认关闭）",
+    "type": "bool",
+    "default": false
+  },
+  "conversation_max_conversations": {
+    "description": "短期对话 Ledger 最大会话数",
+    "type": "int",
+    "default": 128,
+    "min": 1,
+    "max": 10000
+  },
+  "conversation_max_turns": {
+    "description": "每个会话保留的最大 speaker turns",
+    "type": "int",
+    "default": 40,
+    "min": 1,
+    "max": 1000
+  },
+  "conversation_history_budget_chars": {
+    "description": "conversation_history ContextSection 的字符预算",
+    "type": "int",
+    "default": 4000,
+    "min": 1,
+    "max": 100000
+  },
   "observation_capture_text": {
     "description": "仅在明确的本地隔离观察中显示经脱敏的输入/输出文本；默认只记录长度和指纹",
     "type": "bool",

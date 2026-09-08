@@ -692,7 +692,8 @@ class L1Buffer(Component):
                 await user_manager.update_from_analysis(
                     user_id=user_id,
                     group_id=group_id,
-                    personality_tags=_as_str_list(result.get("personality_tags")),
+                    # L25: analyzer output must never become a personality label.
+                    personality_tags=None,
                     interests=_as_str_list(result.get("interests")),
                     occupation=_as_str(result.get("occupation")),
                     language_style=_as_str(result.get("language_style")),
@@ -746,7 +747,8 @@ class L1Buffer(Component):
                     important_events=_as_str_list(result.get("important_events")),
                     taboo_topics=_as_str_list(result.get("taboo_topics")),
                     important_dates=result.get("important_dates"),  # type: ignore[arg-type]
-                    personality_tags=_as_str_list(result.get("personality_tags")),
+                    # L25: analyzer output must never become a personality label.
+                    personality_tags=None,
                     interests=_as_str_list(result.get("interests")),
                     language_style=_as_str(result.get("language_style")),
                     communication_style=_as_str(result.get("communication_style")),
@@ -798,7 +800,7 @@ class L1Buffer(Component):
             await user_manager.update_from_analysis(
                 user_id=user_id,
                 group_id=group_id,
-                personality_tags=_as_str_list(result.get("personality_tags")),
+                personality_tags=None,
                 interests=_as_str_list(result.get("interests")),
                 occupation=_as_str(result.get("occupation")),
                 language_style=_as_str(result.get("language_style")),
@@ -818,7 +820,7 @@ class L1Buffer(Component):
                 important_events=_as_str_list(result.get("important_events")),
                 taboo_topics=_as_str_list(result.get("taboo_topics")),
                 important_dates=result.get("important_dates"),  # type: ignore[arg-type]
-                personality_tags=_as_str_list(result.get("personality_tags")),
+                personality_tags=None,
                 interests=_as_str_list(result.get("interests")),
                 language_style=_as_str(result.get("language_style")),
                 communication_style=_as_str(result.get("communication_style")),

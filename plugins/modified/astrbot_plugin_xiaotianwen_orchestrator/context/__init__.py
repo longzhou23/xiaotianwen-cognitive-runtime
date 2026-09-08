@@ -1,13 +1,8 @@
 """Read-only context adapters and deterministic shadow assembly."""
 
 from .assembler import ContextAssembler, ContextAssemblyResult, PayloadStructuralDiff
-from .budgets import ContextAssemblyPolicy, DEFAULT_SOURCE_PRIORITIES
-from .providers import (
-    ContextAwareAdapter,
-    ImageContextPoolAdapter,
-    IrisMemoryAdapter,
-    SharedContextAdapter,
-)
+from .bridge import ContextBridgeV1
+from .budgets import DEFAULT_SOURCE_PRIORITIES, ContextAssemblyPolicy
 from .memory import (
     AsyncSingleFlightCache,
     MemoryBudgetPolicy,
@@ -17,16 +12,23 @@ from .memory import (
     is_low_information,
     normalize_memory_query,
 )
+from .providers import (
+    ContextAwareAdapter,
+    ImageContextPoolAdapter,
+    IrisMemoryAdapter,
+    SharedContextAdapter,
+)
 
 __all__ = [
+    "DEFAULT_SOURCE_PRIORITIES",
+    "AsyncSingleFlightCache",
     "ContextAssembler",
     "ContextAssemblyPolicy",
     "ContextAssemblyResult",
     "ContextAwareAdapter",
-    "DEFAULT_SOURCE_PRIORITIES",
+    "ContextBridgeV1",
     "ImageContextPoolAdapter",
     "IrisMemoryAdapter",
-    "AsyncSingleFlightCache",
     "MemoryBudgetPolicy",
     "MemoryQueryKey",
     "PayloadStructuralDiff",
