@@ -4,10 +4,12 @@ FROM ${ASTRBOT_BASE_IMAGE}
 COPY patches/response-preference-cas.patch /tmp/response-preference-cas.patch
 
 RUN cd /AstrBot \
-    && patch --batch --forward -p1 < /tmp/response-preference-cas.patch \
+    && sed '/^diff --git a\/tests\//,$d' /tmp/response-preference-cas.patch \
+        > /tmp/response-preference-cas-core.patch \
+    && patch --batch --forward -p1 < /tmp/response-preference-cas-core.patch \
     && python -m py_compile \
         astrbot/core/db/__init__.py \
         astrbot/core/db/sqlite.py \
         astrbot/core/utils/plugin_kv_store.py \
         astrbot/core/utils/shared_preferences.py \
-    && rm /tmp/response-preference-cas.patch
+    && rm /tmp/response-preference-cas.patch /tmp/response-preference-cas-core.patch
