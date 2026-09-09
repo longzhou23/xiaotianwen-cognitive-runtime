@@ -331,6 +331,13 @@ class CognitiveRuntime:
             "affect": 0,
         }
         self.observatory_last_projection_at: float | None = None
+        # Latest-request Observatory read models.  Composition fills these
+        # with owner-validated metadata; they are never cognitive authorities
+        # and never contain scope, user, value, candidate, or message fields.
+        self.observatory_affect_snapshot: dict[str, object] | None = None
+        self.observatory_response_preference_records: list[dict[str, object]] | None = None
+        self.observatory_projection_details: dict[str, dict[str, object]] | None = None
+        self.observatory_feedback_detail: dict[str, object] | None = None
 
     def bind_identity_store(self, storage_path: str | Path) -> None:
         """Bind the single durable Identity owner before handling events."""

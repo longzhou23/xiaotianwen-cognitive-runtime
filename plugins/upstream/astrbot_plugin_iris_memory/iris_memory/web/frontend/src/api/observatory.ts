@@ -12,6 +12,12 @@ export async function getObservatorySummary(): Promise<any> {
   return response.summary
 }
 
+export async function getObservatoryRuntimeDetail(): Promise<any> {
+  const response = await apiGet<any>('cognitive-observatory/runtime-detail')
+  ensure(response, '获取运行态详情失败')
+  return response.detail
+}
+
 export async function getObservatoryEpisodes(params: Record<string, any> = {}): Promise<any> {
   const response = await apiGet<any>('cognitive-observatory/episodes', params)
   ensure(response, '获取 Episode 列表失败')

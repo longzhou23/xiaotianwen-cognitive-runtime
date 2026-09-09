@@ -13,8 +13,10 @@ from quart import Quart
 
 from iris_memory.cognitive.contracts import (
     BehaviorExecutionRecord, BehaviorTrace, DivergenceType, GroundingEnforcement,
-    HostResult, OutputProducer, OutputState, ShadowComparison, TraceStage, TriggerDecision,
+    CanonicalEntity, HostResult, IdentityClaim, IdentityClaimStatus, OutputProducer, OutputState,
+    ShadowComparison, TraceStage, TriggerDecision,
 )
+from iris_memory.cognitive.identity import EntityRegistry
 from iris_memory.cognitive.episode import Episode, EpisodeEventKind, EpisodeEventRef, EpisodeState
 from iris_memory.cognitive.episode_store import InMemoryEpisodeStore
 from iris_memory.cognitive.outcome import OutcomeExplicitness, OutcomeKind, OutcomeObservation
@@ -417,6 +419,132 @@ def test_observatory_never_claims_p2b_behavioral_learning_enabled():
     }
 
 
+def test_runtime_detail_redacts_identity_affect_and_preference_payloads() -> None:
+    registry = EntityRegistry()
+    registry.register_entity(
+        CanonicalEntity(
+            "person:qq:private-user-9988",
+            aliases=("私人别名",),
+            platform_ids={"QQ": "9988"},
+        ),
+        source="admin:secret-admin",
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="私人别名",
+            candidate_entity="person:qq:private-user-9988",
+            evidence=("SECRET EVIDENCE TEXT",),
+            confidence=0.75,
+            source="admin:secret-admin",
+            status=IdentityClaimStatus.CONFIRMED,
+        )
+    )
+    preference = SimpleNamespace(
+        parameter="response_length",
+        value="SECRET PREFERENCE VALUE",
+        candidate_id="secret-candidate-id",
+        scope={"user_id": "private-user-9988", "conversation_id": "private-chat"},
+        status="APPROVED",
+        requested_at=900.0,
+        approved_at=901.0,
+        expires_at=1200.0,
+        revoked_at=None,
+        suspended_reason=None,
+        source=SimpleNamespace(source_kind="EXPLICIT_CONTROLLED_REQUEST", source_event_id="secret-event"),
+    )
+    detail = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={
+            "identity_available": True,
+            "identity_registry": registry,
+            "response_preference_records": [preference],
+            "affect_snapshot": {
+                "schema": "iris.affect-view.v1",
+                "owner": "astrbot_plugin_affection",
+                "user_id": "private-user-9988",
+                "scope": "private-chat",
+                "generated_at": 900.0,
+                "expires_at": 1100.0,
+                "affection": 62.5,
+                "towards_user": "warm",
+                "prompt": "SECRET PROMPT",
+            },
+            "projection_counts": {"relationship": 1, "behavioral_prior": 1, "affect": 1},
+        },
+    ).runtime_detail(now=1000.0)
+    encoded = json.dumps(detail, ensure_ascii=False)
+
+    assert detail["schema_version"] == "iris.observatory-runtime-detail.v1"
+    identity = detail["details"]["identity"]
+    assert identity["status"] == "AVAILABLE"
+    assert identity["entities"][1]["alias_count"] == 1
+    assert any(claim["source_kind"] == "admin" for claim in identity["claims"])
+    assert all(claim["candidate_ref"].startswith(("SELF", "entity#")) for claim in identity["claims"])
+    affect = detail["details"]["affect"]
+    assert affect["status"] == "AVAILABLE"
+    assert affect["metrics"] == [{"name": "affection", "value": 62.5, "maximum": 100.0}]
+    assert affect["labels"] == {"towards_user": "warm"}
+    preference_detail = detail["details"]["response_preferences"]
+    assert preference_detail["status"] == "AVAILABLE"
+    assert preference_detail["records"][0]["parameter"] == "response_length"
+    for secret in ("private-user-9988", "9988", "私人别名", "SECRET EVIDENCE TEXT", "SECRET PREFERENCE VALUE", "secret-candidate-id", "SECRET PROMPT"):
+        assert secret not in encoded
+
+
+def test_runtime_detail_distinguishes_empty_expired_and_unavailable_sources() -> None:
+    empty = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={"identity_available": True, "identity_entities": 0, "identity_claims": 0},
+    ).runtime_detail(now=1000.0)
+    assert empty["details"]["identity"]["status"] == "SUMMARY_ONLY"
+    assert empty["details"]["response_preferences"]["status"] == "UNAVAILABLE"
+    assert empty["details"]["affect"]["status"] == "UNAVAILABLE"
+
+    expired = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={
+            "affect_snapshot": {
+                "schema": "iris.affect-view.v1",
+                "owner": "astrbot_plugin_affection",
+                "generated_at": 100.0,
+                "expires_at": 200.0,
+                "affection": 50.0,
+            }
+        },
+    ).runtime_detail(now=1000.0)
+    assert expired["details"]["affect"]["status"] == "EXPIRED"
+    assert expired["details"]["affect"]["reason"] == "affect_snapshot_ttl_elapsed"
+
+    corrupted = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={
+            "affect_snapshot": {
+                "schema": "iris.affect-view.v1",
+                "owner": "astrbot_plugin_affection",
+                "generated_at": 900.0,
+                "expires_at": 1100.0,
+                "affection": "not-a-number",
+            }
+        },
+    ).runtime_detail(now=1000.0)
+    assert corrupted["details"]["affect"]["status"] == "CORRUPTED"
+    assert corrupted["details"]["affect"]["metrics"] == []
+
+    malformed_preference = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={"response_preference_records": [{"parameter": "unapproved_private_parameter"}]},
+    ).runtime_detail(now=1000.0)
+    assert malformed_preference["details"]["response_preferences"]["status"] == "CORRUPTED"
+
+    class BrokenEpisodeStore(InMemoryEpisodeStore):
+        def all_episodes(self):
+            raise RuntimeError("fictional read failure")
+
+    broken_store = P1ObservatoryService(BrokenEpisodeStore()).runtime_detail(now=1000.0)
+    assert broken_store["details"]["episodes"]["status"] == "UNAVAILABLE"
+    assert broken_store["details"]["outcomes"]["status"] == "UNAVAILABLE"
+
+
 def test_insufficient_review_run_is_visible_as_completed_review_artifact():
     store, episode, outcomes, records = _fixture(outcome_kind=None)
     review_store = InMemoryReviewStore()
@@ -530,6 +658,9 @@ async def test_routes_return_json_and_error_statuses(monkeypatch):
         app.add_url_rule(path, endpoint=path, view_func=handler, methods=methods)
     client = app.test_client()
     assert (await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/summary")).get_json())["success"] is True
+    runtime_detail = await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/runtime-detail")).get_json()
+    assert runtime_detail["success"] is True
+    assert runtime_detail["detail"]["schema_version"] == "iris.observatory-runtime-detail.v1"
     assert (await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/episodes?state=BAD")).get_json())["success"] is False
     assert (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/episodes/missing")).status_code == 404
     preview = await (await client.post(f"/astrbot_plugin_iris_memory/cognitive-observatory/episodes/{episode.episode_id}/preview")).get_json()

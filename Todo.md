@@ -753,3 +753,19 @@ G4：Observatory。
 ## R02 后端 CAS 开发补充
 
 已在 AstrBot 源码中实现 BaseDatabase 可选接口、SQLite BEGIN IMMEDIATE 条件事务、SharedPreferences FIFO CAS 和 PluginKVStoreMixin 接口。限定 response_style_preference:v1；禁止预写缓存、缺记录不创建、冲突返回 False、成功在 commit 后返回。独立连接竞争、队列顺序、缓存读回及故障用例已补，按既有要求未执行。生产尚未安装，历史维护仍关闭。可应用源码补丁、基线哈希和限制见 [CAS 开发说明](deploy/astrbot/patches/response-preference-cas.md)。
+
+## 2026-09-09 认知观测台汇总卡详情
+
+状态：完成（本地源码、虚构数据契约和前端构建已验证）
+
+具体缺口：原有长期适应卡只显示接线状态和匿名计数；Episode/Review 已有详情，但身份、Affect、偏好、P2b 和其他运行态投影缺少可点击的安全详情入口。
+
+实际改动：`plugins/upstream/astrbot_plugin_iris_memory/iris_memory/web/services/observatory_service.py` 新增版本化只读 `runtime_detail` 投影；`web/routes/observatory.py` 新增 `/cognitive-observatory/runtime-detail`；前端 `src/api/observatory.ts`、`src/views/CognitiveObservatoryView.vue` 增加卡片点击/键盘入口和详情面板。Identity 只返回匿名引用、数量、状态、来源类型和时间；Affect 只接受既有 `iris.affect-view.v1`、owner 和 TTL 校验后的安全数值/标签；回复偏好只返回白名单参数、状态、时间、来源类型与失效原因；Relationship、BehavioralPrior、Situation、Feedback、P2b、Review、Episode、Outcome 只显示安全聚合元数据。范围标识、用户标识、完整 UID/alias、候选 ID、消息正文、证据原文和存储 payload 不进入响应。
+
+空、过期、不可用和结构损坏分别返回 `EMPTY`、`EXPIRED`、`UNAVAILABLE`、`CORRUPTED`（Identity 仅有摘要时为 `SUMMARY_ONLY`），前端使用中文状态和原因提示；EpisodeStore 读取失败也保持不可用，不降级为 0。请求组合接线已在 `main.py` 的 `_collect_cognitive_runtime_views` 收口：它只把当前事件通过 owner 校验的 Affect `iris.affect-view.v1` 白名单副本、ProfileStorage 已返回的偏好生命周期元数据、Projection 安全摘要和 feedback observer 无正文状态聚合绑定到 shared `CognitiveRuntime`，下一次空请求会清除对应的请求态记录，过期 Affect 保留 TTL 外壳以显示 `EXPIRED`。未修改 Persona、Affect、Relationship owner 语义，也未读写真实历史、生产 KV、消息正文、secret/config。
+
+验证：后端 `tests/web/test_cognitive_observatory.py`：`26 passed, 1 warning`；覆盖虚构 Identity/Affect/偏好脱敏、TTL 过期、空/不可用/损坏和跨 scope 不泄露，另含新路由契约。前端 `npm run test:run`：`2 files, 11 passed`；`npm run build:check`：`vue-tsc` 与 Vite production build 通过。`git diff --check` 通过。
+
+未验证：真实浏览器人工点击/视觉验收、公开仓库外 affection owner 是否在生产事件上发布同版本快照、真实平台 scope 与 Provider 行为；本地生产组合测试已证明 main/runtime/route 的绑定链和过期/空路径。未部署、提交或推送。前端构建保留既有大图 vendor chunk warning，不影响构建状态。
+
+下一张卡：等待真实运行态 owner 提供同版本脱敏详情后再做只读接线验收；不得因此开放历史写入或自动学习。

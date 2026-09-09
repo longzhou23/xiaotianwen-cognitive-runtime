@@ -26,6 +26,7 @@ v3.0 架构：
 # ruff: noqa: E402
 
 import asyncio
+import math
 import sys
 import time
 from pathlib import Path
@@ -174,6 +175,132 @@ LEGACY_MIGRATION_ENABLED = False
 
 _IRIS_ACTIVE_TIMEOUT = 120
 _UMO_KV_KEY = "iris_reply:group_umo"
+
+# Observatory receives only event-local owner projections.  These helpers keep
+# the runtime cache deliberately smaller than the cognitive views consumed by
+# SituationFull: no scope, user, value, candidate, source-event, or message
+# fields cross the Observatory boundary.
+_OBSERVATORY_AFFECT_LABELS = ("towards_user", "self_state")
+_OBSERVATORY_AFFECT_NUMERIC_FIELDS = {
+    "affection": 100.0,
+    "current_libido_other": 50.0,
+    "current_aggression_other": 50.0,
+    "current_libido_self": 50.0,
+    "current_aggression_self": 50.0,
+}
+_OBSERVATORY_PREFERENCE_PARAMETERS = frozenset(
+    {"response_expansion", "response_length", "tool_memory_retrieval", "relationship_familiarity"}
+)
+_OBSERVATORY_PREFERENCE_STATUSES = frozenset(
+    {"PENDING", "APPROVED", "REVOKED", "SUSPENDED", "SUPERSEDED", "EXPIRED"}
+)
+_OBSERVATORY_FEEDBACK_STATES = frozenset({"ACTIVE", "REVOKED", "CONFLICTED"})
+
+
+def _observatory_timestamp(value: object) -> float | None:
+    if type(value) not in (int, float) or not math.isfinite(float(value)):
+        return None
+    return float(value)
+
+
+def _observatory_affect_snapshot(value: object, *, user_id: object, now: float) -> dict[str, object] | None:
+    """Copy the existing affection-owner carrier after Iris validates it."""
+    del now  # The cache retains a valid TTL envelope so the read model can show EXPIRED.
+    if not isinstance(value, dict):
+        return None
+    if (
+        value.get("schema") != "iris.affect-view.v1"
+        or value.get("owner") != "astrbot_plugin_affection"
+        or str(value.get("user_id", "")) != str(user_id)
+    ):
+        return None
+    generated = _observatory_timestamp(value.get("generated_at"))
+    expires = _observatory_timestamp(value.get("expires_at"))
+    if generated is None or expires is None or expires <= generated:
+        return None
+    snapshot: dict[str, object] = {
+        "schema": "iris.affect-view.v1",
+        "owner": "astrbot_plugin_affection",
+        "generated_at": generated,
+        "expires_at": expires,
+    }
+    for name in _OBSERVATORY_AFFECT_LABELS:
+        if name not in value:
+            continue
+        label = value[name]
+        if not isinstance(label, str) or len(label) > 120:
+            return None
+        snapshot[name] = label
+    for name, maximum in _OBSERVATORY_AFFECT_NUMERIC_FIELDS.items():
+        if name not in value:
+            continue
+        metric = value[name]
+        if (
+            isinstance(metric, bool)
+            or not isinstance(metric, (int, float))
+            or not math.isfinite(float(metric))
+            or float(metric) < 0
+            or float(metric) > maximum
+        ):
+            return None
+        snapshot[name] = float(metric)
+    return snapshot
+
+
+def _observatory_preference_records(records: object, *, now: float) -> list[dict[str, object]] | None:
+    """Project only metadata from the current event's ProfileStorage result."""
+    if records is None:
+        return None
+    if not isinstance(records, (list, tuple)):
+        return None
+    projected: list[dict[str, object]] = []
+    for record in records:
+        parameter = getattr(record, "parameter", None)
+        if parameter not in _OBSERVATORY_PREFERENCE_PARAMETERS:
+            return None
+        display_status = getattr(record, "display_status", None)
+        status = display_status(now) if callable(display_status) else getattr(record, "status", None)
+        if not isinstance(status, str) or status not in _OBSERVATORY_PREFERENCE_STATUSES:
+            return None
+        source = getattr(record, "source", None)
+        source_kind = getattr(source, "source_kind", None)
+        if not isinstance(source_kind, str) or not source_kind:
+            source_kind = "unknown"
+        item: dict[str, object] = {"parameter": parameter, "status": status, "source_kind": source_kind}
+        for name in ("requested_at", "approved_at", "expires_at", "revoked_at"):
+            timestamp = _observatory_timestamp(getattr(record, name, None))
+            if timestamp is not None:
+                item[name] = timestamp
+        suspended_reason = getattr(record, "suspended_reason", None)
+        if isinstance(suspended_reason, str) and len(suspended_reason) <= 120:
+            item["suspended_reason"] = suspended_reason
+        projected.append(item)
+    return projected
+
+
+def _observatory_feedback_detail(observer: object) -> dict[str, object] | None:
+    """Aggregate existing no-body feedback state without exposing exact joins."""
+    if observer is None:
+        return None
+    try:
+        observations = tuple(getattr(observer, "observations", ()))
+    except Exception:
+        return None
+    states = {state: 0 for state in _OBSERVATORY_FEEDBACK_STATES}
+    latest: float | None = None
+    for item in observations:
+        state = getattr(item, "evidence_state", None)
+        if state not in states:
+            return None
+        states[state] += 1
+        occurred_at = getattr(item, "occurred_at", None)
+        try:
+            timestamp = _observatory_timestamp(occurred_at.timestamp())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            timestamp = None
+        if timestamp is not None and (latest is None or timestamp > latest):
+            latest = timestamp
+    return {"evidence_states": states, "latest_observed_at": latest}
 
 # H0 is available on accepted AstrBot hosts.  Keep plugin imports compatible
 # with older test/runtime hosts that do not expose the receipt decorator yet;
@@ -664,6 +791,18 @@ class IrisMemoryPlugin(Star):
                 self, "_response_length_feedback", None
             )
             runtime.observatory_feedback_observer = runtime.response_length_feedback_observer
+            # These are latest-request read models.  They are replaced by
+            # _collect_cognitive_runtime_views after owner validation and are
+            # never loaded from ProfileStorage or affection JSON here.
+            if not hasattr(runtime, "observatory_affect_snapshot"):
+                runtime.observatory_affect_snapshot = None
+            if not hasattr(runtime, "observatory_response_preference_records"):
+                runtime.observatory_response_preference_records = None
+            if not hasattr(runtime, "observatory_projection_details"):
+                runtime.observatory_projection_details = None
+            runtime.observatory_feedback_detail = _observatory_feedback_detail(
+                runtime.observatory_feedback_observer
+            )
             runtime.observatory_p2b_shadow_store = self._p2b_shadow_store
             runtime.observatory_p2b_shadow_last_evaluation_at = self._p2b_shadow_last_evaluation_at
             runtime.p2b_shadow_evaluate = self._run_p2b_shadow_evaluation
@@ -1772,6 +1911,7 @@ class IrisMemoryPlugin(Star):
             explicit_no_tool_request,
         )
         runtime = get_cognitive_runtime()
+        projection_now = time.time()
 
         views: dict[str, dict[str, object]] = {
             "committed_affect": {},
@@ -1784,6 +1924,42 @@ class IrisMemoryPlugin(Star):
             await storage.active_response_preference_records_for_event(event)
             if storage is not None
             else None
+        )
+        runtime.observatory_response_preference_records = _observatory_preference_records(
+            records, now=projection_now
+        )
+        projection_details: dict[str, dict[str, object]] = {
+            "situation": {
+                "source_kind": "CognitiveRuntime",
+                "last_projection_at": projection_now,
+            }
+        }
+        if records:
+            parameters = sorted(
+                {
+                    record.parameter
+                    for record in records
+                    if record.parameter in _OBSERVATORY_PREFERENCE_PARAMETERS
+                }
+            )
+            if parameters:
+                projection_details["behavioral_prior"] = {
+                    "source_kind": "ProfileStorage",
+                    "parameters": parameters,
+                    "last_projection_at": projection_now,
+                }
+            if any(
+                record.parameter == RELATIONSHIP_FAMILIARITY_PARAMETER
+                for record in records
+            ):
+                projection_details["relationship"] = {
+                    "source_kind": "ProfileStorage",
+                    "parameters": [RELATIONSHIP_FAMILIARITY_PARAMETER],
+                    "last_projection_at": projection_now,
+                }
+        runtime.observatory_projection_details = projection_details
+        runtime.observatory_feedback_detail = _observatory_feedback_detail(
+            runtime.observatory_feedback_observer
         )
         message = str(getattr(event, "message_str", "") or "")
         if records:
@@ -1816,17 +1992,14 @@ class IrisMemoryPlugin(Star):
                     "permission_effect": "none",
                 }
 
+        runtime.observatory_affect_snapshot = None
         affect = event.get_extra("iris_affect_view_v1")
         if isinstance(affect, dict):
-            now = time.time()
-            if (
-                affect.get("schema") == "iris.affect-view.v1"
-                and affect.get("owner") == "astrbot_plugin_affection"
-                and type(affect.get("generated_at")) in (int, float)
-                and type(affect.get("expires_at")) in (int, float)
-                and float(affect["generated_at"]) <= now < float(affect["expires_at"])
-                and str(affect.get("user_id", "")) == str(event.get_sender_id())
-            ):
+            cached_affect = _observatory_affect_snapshot(
+                affect, user_id=event.get_sender_id(), now=projection_now
+            )
+            runtime.observatory_affect_snapshot = cached_affect
+            if cached_affect is not None and cached_affect["generated_at"] <= projection_now < cached_affect["expires_at"]:
                 views["committed_affect"] = affect
         counts = getattr(runtime, "observatory_projection_counts", None)
         if isinstance(counts, dict):

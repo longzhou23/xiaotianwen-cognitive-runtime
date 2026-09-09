@@ -8,6 +8,7 @@ const { apiGet, apiPost } = vi.hoisted(() => ({
 vi.mock('./request', () => ({ apiGet, apiPost }))
 
 import {
+  getObservatoryRuntimeDetail,
   getObservatoryEpisode,
   getObservatoryEpisodes,
   previewObservatoryReview
@@ -46,5 +47,26 @@ describe('Cognitive Observatory Episode ID transport', () => {
       `cognitive-observatory/episodes/${episodeId}/preview`,
       {}
     )
+  })
+})
+
+describe('Cognitive Observatory runtime details', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  it('reads the dedicated redacted runtime-detail contract', async () => {
+    const detail = { schema_version: 'iris.observatory-runtime-detail.v1', details: {} }
+    apiGet.mockResolvedValue({ success: true, detail })
+
+    await expect(getObservatoryRuntimeDetail()).resolves.toEqual(detail)
+    expect(apiGet).toHaveBeenCalledWith('cognitive-observatory/runtime-detail')
+  })
+
+  it('fails closed when the detail endpoint is unavailable', async () => {
+    apiGet.mockResolvedValue({ success: false, error: 'runtime detail unavailable' })
+
+    await expect(getObservatoryRuntimeDetail()).rejects.toThrow('runtime detail unavailable')
   })
 })

@@ -17,9 +17,11 @@ def get_observatory_service() -> P1ObservatoryService:
     p2b_store = getattr(runtime, "observatory_p2b_shadow_store", None)
     registry = getattr(runtime, "registry", None)
     try:
-        entity_count = len(registry.entities()) if registry is not None else None
-        claim_count = len(registry.all_claims()) if registry is not None else None
+        registry_available = registry is not None and getattr(registry, "available", True) is True
+        entity_count = len(registry.entities()) if registry_available else None
+        claim_count = len(registry.all_claims()) if registry_available else None
     except Exception:
+        registry_available = False
         entity_count = claim_count = None
     return P1ObservatoryService(
         getattr(observer, "store", None),
@@ -37,9 +39,16 @@ def get_observatory_service() -> P1ObservatoryService:
             "host_cas_available": getattr(runtime, "observatory_host_cas_available", False),
             "feedback_available": bool(getattr(feedback, "available", False)),
             "feedback_observations": len(getattr(feedback, "observations", ())),
-            "identity_available": entity_count is not None and claim_count is not None,
+            "identity_available": registry_available and entity_count is not None and claim_count is not None,
             "identity_entities": entity_count,
             "identity_claims": claim_count,
+            "identity_registry": registry,
+            # Affect snapshots are accepted only when another owner explicitly
+            # publishes the existing versioned, TTL-bound sanitized carrier.
+            "affect_snapshot": getattr(runtime, "observatory_affect_snapshot", None),
+            "projection_details": getattr(runtime, "observatory_projection_details", None),
+            "response_preference_records": getattr(runtime, "observatory_response_preference_records", None),
+            "feedback_detail": getattr(runtime, "observatory_feedback_detail", None),
             "projection_counts": dict(getattr(runtime, "observatory_projection_counts", {})),
             "last_projection_at": getattr(runtime, "observatory_last_projection_at", None),
             "p2b_shadow_store": p2b_store,
@@ -52,6 +61,16 @@ def get_observatory_service() -> P1ObservatoryService:
 
 async def observatory_summary():
     return jsonify({"success": True, "summary": get_observatory_service().summary()})
+
+
+async def observatory_runtime_detail():
+    try:
+        return jsonify({"success": True, "detail": get_observatory_service().runtime_detail()})
+    except (TypeError, ValueError):
+        # A malformed optional owner projection is rendered as unavailable by
+        # the service; this boundary protects the endpoint if its clock input
+        # or host object is itself invalid.
+        return jsonify({"success": False, "error": "runtime detail unavailable"}), 503
 
 
 async def observatory_episodes():
@@ -97,6 +116,7 @@ def register_observatory_routes(context) -> None:
     prefix = f"/{PLUGIN_NAME}/cognitive-observatory"
     for route, handler, methods, description in [
         (f"{prefix}/summary", observatory_summary, ["GET"], "获取认知观测台摘要"),
+        (f"{prefix}/runtime-detail", observatory_runtime_detail, ["GET"], "获取运行态脱敏详情"),
         (f"{prefix}/episodes", observatory_episodes, ["GET"], "获取 Episode 列表"),
         (f"{prefix}/episodes/<episode_id>", observatory_episode_detail, ["GET"], "获取 Episode 详情"),
         (f"{prefix}/episodes/<episode_id>/preview", observatory_preview, ["POST"], "预览 Review（不持久化）"),

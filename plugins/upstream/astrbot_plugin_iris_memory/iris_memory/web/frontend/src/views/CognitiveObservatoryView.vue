@@ -62,14 +62,87 @@
       </div>
       <v-row dense>
         <v-col v-for="item in adaptiveCards" :key="item.label" cols="12" sm="6" lg="4">
-          <v-card variant="outlined" class="adaptive-card pa-3">
+          <v-card variant="outlined" class="adaptive-card adaptive-card-clickable pa-3" role="button" tabindex="0" @click="openAdaptiveDetail(item.key)" @keyup.enter="openAdaptiveDetail(item.key)" @keyup.space.prevent="openAdaptiveDetail(item.key)">
             <div class="d-flex align-center ga-2"><v-icon :icon="item.icon" :color="item.ready ? 'success' : 'grey'" /><strong>{{ item.label }}</strong><v-spacer /><v-chip size="x-small" :color="item.ready ? 'success' : 'grey'">{{ item.ready ? '已接通' : '不可用' }}</v-chip></div>
             <div class="text-body-2 mt-2">{{ item.value }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.detail }}</div>
+            <v-btn variant="text" size="small" class="px-0 mt-1" append-icon="mdi-arrow-right" @click.stop="openAdaptiveDetail(item.key)">查看详情</v-btn>
           </v-card>
         </v-col>
       </v-row>
       <v-alert color="amber-darken-2" variant="tonal" density="compact" class="mt-3 mb-0">L28 历史数据写入仍锁定；仅在精确单条授权后开放。日常请求中的已批准偏好、关系熟悉度、BehavioralPrior 和 Affect 只读投影可继续生效。</v-alert>
     </v-card>
+
+    <v-dialog v-model="adaptiveDetailOpen" max-width="960">
+      <v-card>
+        <v-card-title class="d-flex align-center ga-2">
+          <v-icon :icon="selectedAdaptiveCard?.icon || 'mdi-information-outline'" />
+          <span>{{ selectedAdaptiveCard?.label || '运行态详情' }}</span>
+          <v-spacer />
+          <v-chip v-if="adaptiveDetail" size="small" :color="detailStatusColor(adaptiveDetail.status)">{{ detailStatusLabel(adaptiveDetail.status) }}</v-chip>
+        </v-card-title>
+        <v-card-text>
+          <v-alert v-if="!adaptiveDetail" type="info" variant="tonal" density="compact">详情接口当前不可用；汇总卡不会把不可用误报成空数据。</v-alert>
+          <template v-else>
+            <div class="text-caption text-medium-emphasis mb-3">来源：{{ adaptiveDetail.owner || '当前 owner 未提供' }}。此面板仅显示脱敏元数据；范围标识、用户标识、消息正文、证据原文和存储 payload 已隐藏。</div>
+            <v-alert v-if="!adaptiveDetail.available" :type="adaptiveDetail.status === 'CORRUPTED' ? 'error' : 'warning'" variant="tonal" density="compact" class="mb-3">{{ detailReason(adaptiveDetail.reason) }}</v-alert>
+
+            <template v-if="selectedAdaptiveKey === 'identity'">
+              <v-row dense>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.entity_count ?? '—' }}</div><div class="text-caption">实体</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.claim_count ?? '—' }}</div><div class="text-caption">身份声明</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.self_present === true ? '是' : adaptiveDetail.self_present === false ? '否' : '—' }}</div><div class="text-caption">SELF 已绑定</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ formatStatusCount(adaptiveDetail.status_counts) }}</div><div class="text-caption">声明状态</div></v-col>
+              </v-row>
+              <div class="section-label mt-4">实体（匿名引用）</div>
+              <v-table v-if="adaptiveDetail.entities?.length" density="compact">
+                <thead><tr><th>匿名引用</th><th>类型</th><th>别名数量</th><th>平台绑定数</th></tr></thead>
+                <tbody><tr v-for="entity in adaptiveDetail.entities" :key="entity.entity_ref"><td>{{ entity.entity_ref }}</td><td>{{ entity.kind }}</td><td>{{ entity.alias_count }}</td><td>{{ entity.platform_binding_count }}</td></tr></tbody>
+              </v-table>
+              <div v-else class="text-body-2 text-medium-emphasis">{{ detailReason(adaptiveDetail.reason || 'identity_registry_empty') }}</div>
+              <div class="section-label mt-4">声明（不显示别名与证据）</div>
+              <v-table v-if="adaptiveDetail.claims?.length" density="compact">
+                <thead><tr><th>声明引用</th><th>目标</th><th>状态</th><th>置信度</th><th>来源类型</th><th>时间</th></tr></thead>
+                <tbody><tr v-for="claim in adaptiveDetail.claims" :key="claim.claim_ref"><td>{{ claim.claim_ref }}</td><td>{{ claim.candidate_ref }}</td><td>{{ claim.status }}</td><td>{{ claim.confidence ?? '—' }}</td><td>{{ claim.source_kind }}</td><td>{{ formatObservedAt(claim.created_at) }}</td></tr></tbody>
+              </v-table>
+              <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的身份声明。</div>
+            </template>
+
+            <template v-else-if="selectedAdaptiveKey === 'affect'">
+              <v-row dense>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ formatObservedAt(adaptiveDetail.generated_at) }}</div><div class="text-caption">生成时间</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ formatObservedAt(adaptiveDetail.expires_at) }}</div><div class="text-caption">失效时间</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.ttl_seconds ?? '—' }}s</div><div class="text-caption">快照 TTL</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.metrics?.length || 0 }}</div><div class="text-caption">安全数值</div></v-col>
+              </v-row>
+              <v-table v-if="adaptiveDetail.metrics?.length" density="compact" class="mt-3"><thead><tr><th>脱敏字段</th><th>当前值</th><th>上限</th></tr></thead><tbody><tr v-for="metric in adaptiveDetail.metrics" :key="metric.name"><td>{{ metric.name }}</td><td>{{ metric.value }}</td><td>{{ metric.maximum }}</td></tr></tbody></v-table>
+              <v-table v-if="Object.keys(adaptiveDetail.labels || {}).length" density="compact" class="mt-3"><thead><tr><th>状态标签</th><th>内容</th></tr></thead><tbody><tr v-for="(value, name) in adaptiveDetail.labels" :key="name"><td>{{ name }}</td><td>{{ value }}</td></tr></tbody></v-table>
+              <div v-if="adaptiveDetail.status === 'EMPTY'" class="text-body-2 text-medium-emphasis mt-3">当前快照没有可显示的脱敏数值或标签。</div>
+            </template>
+
+            <template v-else-if="selectedAdaptiveKey === 'response_preferences'">
+              <v-table v-if="adaptiveDetail.records?.length" density="compact"><thead><tr><th>参数</th><th>状态</th><th>请求时间</th><th>批准时间</th><th>失效时间</th><th>来源类型</th></tr></thead><tbody><tr v-for="record in adaptiveDetail.records" :key="record.parameter + record.requested_at + record.status"><td>{{ record.parameter }}</td><td>{{ record.status }}</td><td>{{ formatObservedAt(record.requested_at) }}</td><td>{{ formatObservedAt(record.approved_at) }}</td><td>{{ formatObservedAt(record.expires_at) }}</td><td>{{ record.source_kind }}</td></tr></tbody></v-table>
+              <div v-else class="text-body-2 text-medium-emphasis">{{ detailReason(adaptiveDetail.reason) }}</div>
+            </template>
+
+            <template v-else-if="selectedAdaptiveKey === 'p2b_shadow'">
+              <v-row dense>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.mode || '—' }}</div><div class="text-caption">模式</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.permission_effect || '—' }}</div><div class="text-caption">权限影响</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ formatObservedAt(adaptiveDetail.last_evaluation_at) }}</div><div class="text-caption">最近评估</div></v-col>
+                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.allowed_parameters?.join('、') || '—' }}</div><div class="text-caption">允许参数</div></v-col>
+              </v-row>
+              <div class="section-label mt-4">候选状态统计</div>
+              <v-table density="compact"><thead><tr><th>状态</th><th>数量</th></tr></thead><tbody><tr v-for="(count, status) in adaptiveDetail.candidate_status_counts" :key="status"><td>{{ status }}</td><td>{{ count }}</td></tr></tbody></v-table>
+            </template>
+
+            <template v-else>
+              <v-table density="compact"><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr v-for="row in adaptiveDetailRows" :key="row.label"><td>{{ row.label }}</td><td class="word-break">{{ row.value }}</td></tr></tbody></v-table>
+            </template>
+          </template>
+        </v-card-text>
+        <v-card-actions><v-spacer /><v-btn variant="text" @click="adaptiveDetailOpen = false">关闭</v-btn></v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <v-card variant="flat" class="panel pa-4 mb-3 p2b-shadow-panel">
       <div class="d-flex align-center flex-wrap ga-2 mb-3">
@@ -205,12 +278,20 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode, getObservatoryEpisodes, getObservatorySummary, previewObservatoryReview } from '@/api/observatory'
+import { getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode, getObservatoryEpisodes, getObservatoryRuntimeDetail, getObservatorySummary, previewObservatoryReview } from '@/api/observatory'
 
-const summary = ref<any>(null); const episodes = ref<any[]>([]); const demos = ref<any[]>([]); const detail = ref<any>(null); const previewResult = ref<any>(null)
-const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple')
+const summary = ref<any>(null); const runtimeDetail = ref<any>(null); const episodes = ref<any[]>([]); const demos = ref<any[]>([]); const detail = ref<any>(null); const previewResult = ref<any>(null)
+const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple'); const selectedAdaptiveKey = ref(''); const adaptiveDetailOpen = ref(false)
 const phaseTitle = computed(() => summary.value?.phase || 'Cognitive Observatory')
 const p2bShadow = computed(() => summary.value?.p2b_shadow || null)
+const adaptiveDetail = computed(() => selectedAdaptiveKey.value ? runtimeDetail.value?.details?.[selectedAdaptiveKey.value] || null : null)
+const selectedAdaptiveCard = computed(() => adaptiveCards.value.find(card => card.key === selectedAdaptiveKey.value) || null)
+const adaptiveDetailRows = computed(() => {
+  const value = adaptiveDetail.value
+  if (!value || typeof value !== 'object') return []
+  const fields: Array<[string, string]> = [['status', '状态'], ['observed', '观察次数'], ['record_count', '记录数'], ['run_count', 'ReviewRun'], ['finding_count', 'Finding'], ['evidence_count', 'Evidence'], ['count', '总数'], ['finalized_count', '已完成'], ['outcome_count', 'Outcome'], ['mode', '模式'], ['permission_effect', '权限影响'], ['last_projection_at', '最近投影'], ['latest_observed_at', '最近观察'], ['reason', '说明']]
+  return fields.filter(([key]) => value[key] !== undefined && value[key] !== null).map(([key, label]) => ({ label, value: key.endsWith('_at') ? formatObservedAt(value[key]) : key === 'reason' ? detailReason(value[key]) : String(value[key]) }))
+})
 const p2bHeaderLabel = computed(() => p2bShadow.value ? `P2b 影子模式 · ${p2bShadow.value.mode || 'SHADOW'}` : 'P2b 影子摘要 · 未接通')
 const p2bHeaderColor = computed(() => p2bShadow.value?.mode === 'SHADOW' ? 'info' : 'grey')
 const p2bStatusCards = computed(() => {
@@ -231,13 +312,20 @@ const p2bPermissionEffect = computed(() => String(p2bShadow.value?.permission_ef
 const summaryCards = computed(() => [{ label: 'Episodes', value: summary.value?.episodes ?? '—' }, { label: 'Finalized', value: summary.value?.finalized_episodes ?? '—' }, { label: 'Outcomes', value: summary.value?.outcomes ?? '—' }, { label: 'Review Runs', value: summary.value?.review_runs ?? '—' }, { label: 'Findings', value: summary.value?.review_findings ?? '—' }, { label: 'Evidence', value: summary.value?.review_evidence ?? '—' }])
 const adaptiveCards = computed(() => {
   const a = summary.value?.adaptive_runtime || {}
+  const d = runtimeDetail.value?.details || {}
   return [
-    { label: 'Host 原子写', icon: 'mdi-database-lock-outline', ready: !!a.host_cas?.available, value: a.host_cas?.available ? 'CAS + 事务 + 读回' : 'Host API 未提供', detail: '仅限 response_style_preference:v1' },
-    { label: '反馈重放', icon: 'mdi-replay', ready: !!a.feedback_replay?.available, value: `${a.feedback_replay?.observations ?? 0} 条有效观察`, detail: 'append-only，跨重启恢复' },
-    { label: '身份库', icon: 'mdi-account-key-outline', ready: !!a.identity?.available, value: `${a.identity?.entities ?? '—'} 实体 · ${a.identity?.claims ?? '—'} 声明`, detail: 'Identity / EntityRegistry 单一 owner' },
-    { label: 'Situation 投影', icon: 'mdi-layers-triple-outline', ready: !!a.situation?.available, value: `${a.situation?.events ?? 0} 次请求投影`, detail: a.situation?.last_projection_at ? `最近 ${formatUnix(a.situation.last_projection_at)}` : '等待真实请求' },
-    { label: 'BehavioralPrior', icon: 'mdi-tune-variant', ready: !!a.behavioral_prior?.available, value: `${a.behavioral_prior?.observed ?? 0} 次命中`, detail: '只读表达偏好；不改变工具或回复权限' },
-    { label: 'Affect 视图', icon: 'mdi-heart-pulse', ready: !!a.affect?.available, value: `${a.affect?.observed ?? 0} 次有效投影`, detail: `affection owner · TTL ${a.affect?.ttl_seconds ?? 60}s` },
+    { key: 'host_cas', label: 'Host 原子写', icon: 'mdi-database-lock-outline', ready: !!a.host_cas?.available, value: a.host_cas?.available ? 'CAS + 事务 + 读回' : 'Host API 未提供', detail: '仅限 response_style_preference:v1' },
+    { key: 'feedback_replay', label: '反馈重放', icon: 'mdi-replay', ready: !!a.feedback_replay?.available, value: `${a.feedback_replay?.observations ?? 0} 条有效观察`, detail: 'append-only，跨重启恢复' },
+    { key: 'identity', label: '身份库', icon: 'mdi-account-key-outline', ready: !!a.identity?.available, value: `${a.identity?.entities ?? '—'} 实体 · ${a.identity?.claims ?? '—'} 声明`, detail: 'Identity / EntityRegistry 单一 owner' },
+    { key: 'situation', label: 'Situation 投影', icon: 'mdi-layers-triple-outline', ready: !!a.situation?.available, value: `${a.situation?.events ?? 0} 次请求投影`, detail: a.situation?.last_projection_at ? `最近 ${formatUnix(a.situation.last_projection_at)}` : '等待真实请求' },
+    { key: 'relationship', label: 'Relationship 投影', icon: 'mdi-account-heart-outline', ready: d.relationship?.available === true, value: `${d.relationship?.observed ?? a.relationship?.observed ?? 0} 次观察`, detail: '只读投影 · owner ProfileStorage' },
+    { key: 'behavioral_prior', label: 'BehavioralPrior', icon: 'mdi-tune-variant', ready: !!a.behavioral_prior?.available, value: `${a.behavioral_prior?.observed ?? 0} 次命中`, detail: '只读表达偏好；不改变工具或回复权限' },
+    { key: 'affect', label: 'Affect 视图', icon: 'mdi-heart-pulse', ready: !!a.affect?.available, value: `${a.affect?.observed ?? 0} 次有效投影`, detail: `affection owner · TTL ${a.affect?.ttl_seconds ?? 60}s` },
+    { key: 'response_preferences', label: '回复偏好', icon: 'mdi-format-list-checks', ready: d.response_preferences?.available === true, value: `${d.response_preferences?.record_count ?? '—'} 条安全记录`, detail: '只显示参数、状态、来源类型和 TTL' },
+    { key: 'p2b_shadow', label: 'P2b 影子候选', icon: 'mdi-flask-outline', ready: d.p2b_shadow?.available === true, value: d.p2b_shadow?.available ? '可查看状态统计' : '影子存储未接通', detail: '不展示候选 ID、scope、证据或值' },
+    { key: 'review', label: 'Review', icon: 'mdi-file-search-outline', ready: d.review?.available === true, value: `${d.review?.run_count ?? '—'} Run · ${d.review?.finding_count ?? '—'} Finding`, detail: '只显示审计计数和状态' },
+    { key: 'episodes', label: 'Episodes', icon: 'mdi-view-list-outline', ready: d.episodes?.available === true, value: `${d.episodes?.count ?? '—'} 段 · ${d.episodes?.finalized_count ?? '—'} 已完成`, detail: '详细内容仍需选择具体 Episode' },
+    { key: 'outcomes', label: 'Outcomes', icon: 'mdi-flag-checkered', ready: d.outcomes?.available === true, value: `${d.outcomes?.count ?? '—'} 条观察`, detail: '只显示数量与 owner 状态' },
   ]
 })
 const reviewStatusSummary = computed(() => {
@@ -255,8 +343,28 @@ const formatUnix = (value?: number) => value ? new Date(value * 1000).toLocaleSt
 const formatObservedAt = (value?: string | number) => typeof value === 'number' ? formatUnix(value) : formatTime(value)
 const p2bFlagLabel = (value?: boolean) => value === false ? '关闭' : value === true ? '开启' : '未提供'
 const pretty = (value: unknown) => JSON.stringify(value, null, 2)
+const detailStatusLabel = (value?: string) => ({ AVAILABLE: '可用', SUMMARY_ONLY: '仅有摘要', EMPTY: '为空', EXPIRED: '已过期', UNAVAILABLE: '不可用', CORRUPTED: '数据损坏' } as Record<string, string>)[value || ''] || value || '不可用'
+const detailStatusColor = (value?: string) => value === 'AVAILABLE' ? 'success' : value === 'SUMMARY_ONLY' ? 'info' : value === 'CORRUPTED' ? 'error' : value === 'EXPIRED' ? 'amber-darken-2' : 'grey'
+const detailReason = (value?: string) => ({
+  sanitized_affect_snapshot_not_bound: 'Affect owner 尚未提供可验证的脱敏快照。',
+  affect_snapshot_ttl_elapsed: '脱敏 Affect 快照已超过 TTL，当前不会继续展示旧数值。',
+  identity_registry_empty: '当前没有可显示的身份声明。',
+  response_preferences_not_bound: '偏好 owner 尚未提供可验证的安全详情。',
+  feedback_replay_not_bound: '反馈重放 owner 尚未提供可验证的安全详情。',
+  invalid_affect_metric: 'Affect 快照结构无法验证，已停止展示其内容。',
+  invalid_affect_snapshot: 'Affect 快照结构无法验证，已停止展示其内容.',
+} as Record<string, string>)[value || ''] || (value ? `状态原因：${value}` : '当前没有可用的安全详情。')
+const formatStatusCount = (value?: Record<string, number>) => {
+  if (!value || typeof value !== 'object') return '—'
+  const entries = Object.entries(value).filter(([, count]) => typeof count === 'number')
+  return entries.length ? entries.map(([status, count]) => `${status} ${count}`).join(' · ') : '—'
+}
+function openAdaptiveDetail(key: string) { selectedAdaptiveKey.value = key; adaptiveDetailOpen.value = true }
+async function loadRuntimeDetail() {
+  try { runtimeDetail.value = await getObservatoryRuntimeDetail() } catch { runtimeDetail.value = null }
+}
 async function loadEpisodes() { loading.value = true; try { const result = await getObservatoryEpisodes({ state: state.value, query: query.value, limit: 50 }); episodes.value = result.episodes || [] } catch (e: any) { error.value = e.message || '读取 Episode 失败' } finally { loading.value = false } }
-async function loadAll() { error.value = ''; await Promise.all([getObservatorySummary().then(v => summary.value = v), getObservatoryDemoCases().then(v => demos.value = v), loadEpisodes()]).catch((e: any) => error.value = e.message || '加载失败') }
+async function loadAll() { error.value = ''; await Promise.all([getObservatorySummary().then(v => summary.value = v), getObservatoryDemoCases().then(v => demos.value = v), loadEpisodes(), loadRuntimeDetail()]).catch((e: any) => error.value = e.message || '加载失败') }
 async function selectEpisode(id: string) { selectedId.value = id; isDemo.value = false; previewResult.value = null; try { detail.value = await getObservatoryEpisode(id) } catch (e: any) { error.value = e.message || '读取详情失败' } }
 async function selectDemo(id: string) { selectedId.value = ''; isDemo.value = true; previewResult.value = null; try { const result = await getObservatoryDemoCase(id); detail.value = result.detail; previewResult.value = result.preview } catch (e: any) { error.value = e.message || '读取 Demo 失败' } }
 async function preview() { if (!selectedId.value) return; try { previewResult.value = await previewObservatoryReview(selectedId.value) } catch (e: any) { error.value = e.message || 'Preview 失败' } }
@@ -264,5 +372,5 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.adaptive-panel { background: linear-gradient(135deg, rgba(0, 137, 123, .06), rgba(124, 77, 255, .05)); }.adaptive-card { min-height: 116px; background: rgba(var(--v-theme-surface), .72); }.p2b-shadow-panel { background: linear-gradient(135deg, rgba(33, 150, 243, .08), rgba(0, 188, 212, .06)); }.p2b-overview-card { min-height: 126px; background: rgba(var(--v-theme-surface), .72); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
+.hero { background: linear-gradient(120deg, rgba(21, 101, 192, .12), rgba(0, 137, 123, .08)); border: 1px solid rgba(var(--v-theme-primary), .13); }.metric,.panel { border: 1px solid rgba(var(--v-theme-on-surface), .08); }.adaptive-panel { background: linear-gradient(135deg, rgba(0, 137, 123, .06), rgba(124, 77, 255, .05)); }.adaptive-card { min-height: 116px; background: rgba(var(--v-theme-surface), .72); }.adaptive-card-clickable { cursor: pointer; }.adaptive-card-clickable:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 2px; }.detail-metric { font-size: 1.18rem; font-weight: 700; overflow-wrap: anywhere; }.p2b-shadow-panel { background: linear-gradient(135deg, rgba(33, 150, 243, .08), rgba(0, 188, 212, .06)); }.p2b-overview-card { min-height: 126px; background: rgba(var(--v-theme-surface), .72); }.episode-list { max-height: 410px; overflow: auto; }.state-toggle { max-width: 100%; overflow-x: auto; }.min-detail { min-height: 650px; }.pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: .78rem; color: rgba(var(--v-theme-on-surface), .7); }.pipeline strong { color: rgb(var(--v-theme-warning)); }.section-label { font-size: .88rem; font-weight: 700; margin-bottom: 8px; }.human-card { min-height: 132px; }.human-metric { font-size: 1.45rem; font-weight: 700; }.terminology p { margin: 0 0 8px; }.word-break { word-break: break-all; } pre { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: .76rem; background: rgba(var(--v-theme-on-surface), .05); padding: 10px; border-radius: 6px; } @media (max-width: 600px) { .pipeline { display: none; } }
 </style>

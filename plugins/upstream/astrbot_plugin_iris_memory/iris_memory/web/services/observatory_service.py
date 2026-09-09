@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+import hashlib
+import math
+import time
 from typing import Any, Mapping
 
 from iris_memory.cognitive.contracts import (
@@ -52,6 +55,38 @@ def _json_value(value: Any) -> Any:
 
 def _timestamp(value: datetime | None) -> str | None:
     return _json_value(value) if value else None
+
+
+_RUNTIME_DETAIL_SCHEMA = "iris.observatory-runtime-detail.v1"
+_SAFE_AFFECT_NUMERIC_FIELDS = {
+    "affection": 100.0,
+    "current_libido_other": 50.0,
+    "current_aggression_other": 50.0,
+    "current_libido_self": 50.0,
+    "current_aggression_self": 50.0,
+}
+_SAFE_AFFECT_LABEL_FIELDS = {"towards_user", "self_state"}
+_SAFE_PREFERENCE_PARAMETERS = {
+    "response_expansion",
+    "response_length",
+    "tool_memory_retrieval",
+    "relationship_familiarity",
+}
+
+
+def _opaque_ref(value: object, prefix: str = "ref") -> str:
+    """Return a stable short reference without exposing the supplied value."""
+    digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    return f"{prefix}#{digest[:10]}"
+
+
+def _safe_count(value: object, default: int = 0) -> int:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 class P1ObservatoryService:
@@ -175,6 +210,434 @@ class P1ObservatoryService:
             "p2b_shadow": p2b_shadow,
             "adaptive_runtime": self._adaptive_runtime_projection(),
         }
+
+    def runtime_detail(self, *, now: float | None = None) -> dict[str, Any]:
+        """Return a safe detail projection for the runtime summary cards.
+
+        The dashboard does not have a conversation scope, so this method never
+        exposes scope identifiers, user IDs, aliases, candidate IDs, message
+        text, evidence text, or storage payloads.  Owner objects are read only;
+        malformed owner data is represented as ``CORRUPTED`` instead of being
+        guessed into an apparently healthy state.
+        """
+
+        current_time = time.time() if now is None else float(now)
+        if not math.isfinite(current_time):
+            current_time = time.time()
+        episodes = ()
+        outcomes = ()
+        episode_read_ok = self._episode_store is None
+        if self._episode_store is not None:
+            try:
+                episodes = tuple(self._episode_store.all_episodes())
+                outcomes = tuple(self._episode_store.get_outcomes())
+                episode_read_ok = True
+            except Exception:
+                episodes = outcomes = ()
+                episode_read_ok = False
+        return {
+            "schema_version": _RUNTIME_DETAIL_SCHEMA,
+            "available": True,
+            "generated_at": current_time,
+            "details": {
+                "identity": self._identity_runtime_detail(),
+                "host_cas": self._host_cas_runtime_detail(),
+                "relationship": self._projection_runtime_detail(
+                    "relationship", owner="ProfileStorage", count_key="relationship", ttl_seconds=7 * 24 * 60 * 60,
+                ),
+                "behavioral_prior": self._projection_runtime_detail(
+                    "behavioral_prior", owner="ProfileStorage", count_key="behavioral_prior",
+                ),
+                "situation": self._projection_runtime_detail(
+                    "situation", owner="CognitiveRuntime", count_key="events",
+                ),
+                "affect": self._affect_runtime_detail(current_time),
+                "feedback_replay": self._feedback_runtime_detail(current_time),
+                "response_preferences": self._preference_runtime_detail(current_time),
+                "p2b_shadow": self._p2b_runtime_detail(),
+                "episodes": {
+                    "available": episode_read_ok,
+                    "status": "AVAILABLE" if episode_read_ok else "UNAVAILABLE",
+                    "count": len(episodes) if episode_read_ok else "Unavailable",
+                    "finalized_count": (
+                        sum(item.state is EpisodeState.FINALIZED for item in episodes)
+                        if episode_read_ok
+                        else "Unavailable"
+                    ),
+                    "outcome_count": len(outcomes) if episode_read_ok else "Unavailable",
+                    "reason": None if episode_read_ok else "episode_store_read_failed" if self._episode_store is not None else "episode_store_not_wired",
+                },
+                "outcomes": {
+                    "available": episode_read_ok,
+                    "status": "AVAILABLE" if episode_read_ok and outcomes else "EMPTY" if episode_read_ok else "UNAVAILABLE",
+                    "owner": "EpisodeStore",
+                    "count": len(outcomes) if episode_read_ok else "Unavailable",
+                    "reason": None if episode_read_ok and outcomes else "outcome_store_empty" if episode_read_ok else "episode_store_read_failed",
+                },
+                "review": self._review_runtime_detail(episodes) if episode_read_ok else {
+                    "available": False,
+                    "status": "UNAVAILABLE",
+                    "owner": "ReviewStore",
+                    "reason": "episode_store_read_failed",
+                },
+            },
+        }
+
+    def _host_cas_runtime_detail(self) -> dict[str, Any]:
+        available = self._state_bool("host_cas_available")
+        return {
+            "available": available,
+            "status": "AVAILABLE" if available else "UNAVAILABLE",
+            "owner": "Host persistence adapter",
+            "mode": "CAS + transaction + read-back" if available else None,
+            "allowed_parameter": "response_style_preference:v1",
+            "permission_effect": "NONE",
+            "reason": None if available else "host_cas_not_bound",
+        }
+
+    def _identity_runtime_detail(self) -> dict[str, Any]:
+        """Project Identity without returning private identifiers or aliases."""
+
+        base = {
+            "owner": "Identity/EntityRegistry",
+            "redacted_fields": ["platform_uid", "alias", "evidence"],
+            "entities": [],
+            "claims": [],
+            "status_counts": {},
+        }
+        registry = self._runtime_state.get("identity_registry")
+        if registry is None:
+            available = self._state_bool("identity_available")
+            base.update(
+                {
+                    "available": available,
+                    "status": "SUMMARY_ONLY" if available else "UNAVAILABLE",
+                    "entity_count": self._runtime_state.get("identity_entities") if available else "Unavailable",
+                    "claim_count": self._runtime_state.get("identity_claims") if available else "Unavailable",
+                    "reason": "identity_registry_not_bound" if available else "identity_registry_unavailable",
+                }
+            )
+            return base
+        if getattr(registry, "available", True) is not True:
+            base.update(
+                {
+                    "available": False,
+                    "status": "UNAVAILABLE",
+                    "entity_count": "Unavailable",
+                    "claim_count": "Unavailable",
+                    "reason": "identity_registry_corrupted_or_unavailable",
+                }
+            )
+            return base
+        try:
+            entities = tuple(registry.entities())
+            claims = tuple(registry.all_claims())
+            self_entity = str(getattr(registry, "self_entity", ""))
+            entity_views = []
+            entity_keys: dict[str, str] = {}
+            for entity in entities:
+                entity_id = str(getattr(entity, "id", ""))
+                if not entity_id:
+                    raise ValueError("identity entity lacks an ID")
+                entity_key = "SELF" if entity_id == self_entity else _opaque_ref(entity_id, "entity")
+                entity_keys[entity_id] = entity_key
+                aliases = getattr(entity, "aliases", ())
+                platform_ids = getattr(entity, "platform_ids", {})
+                entity_views.append(
+                    {
+                        "entity_ref": entity_key,
+                        "kind": entity_id.split(":", 1)[0].upper() or "UNKNOWN",
+                        "alias_count": len(tuple(aliases)) if aliases is not None else 0,
+                        "platform_binding_count": len(platform_ids) if isinstance(platform_ids, Mapping) else 0,
+                    }
+                )
+            claim_views = []
+            status_counts: dict[str, int] = {}
+            for claim in claims:
+                status = getattr(getattr(claim, "status", None), "value", None)
+                status = str(status or "UNKNOWN")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                candidate = str(getattr(claim, "candidate_entity", ""))
+                source = str(getattr(claim, "source", ""))
+                claim_views.append(
+                    {
+                        "claim_ref": _opaque_ref(
+                            getattr(registry, "claim_id", lambda value: value)(claim), "claim"
+                        ),
+                        "candidate_ref": entity_keys.get(candidate, _opaque_ref(candidate, "entity")),
+                        "status": status,
+                        "confidence": getattr(claim, "confidence", None),
+                        "source_kind": source.split(":", 1)[0] if source else "unknown",
+                        "created_at": _json_value(getattr(claim, "created_at", None)),
+                    }
+                )
+            return {
+                **base,
+                "available": True,
+                "status": "AVAILABLE" if entities or claims else "EMPTY",
+                "entity_count": len(entities),
+                "claim_count": len(claims),
+                "self_present": bool(self_entity and self_entity in entity_keys),
+                "entities": entity_views,
+                "claims": claim_views,
+                "status_counts": status_counts,
+                "reason": "identity_registry_empty" if not entities and not claims else None,
+            }
+        except Exception:
+            return {
+                **base,
+                "available": False,
+                "status": "CORRUPTED",
+                "entity_count": "Unavailable",
+                "claim_count": "Unavailable",
+                "reason": "identity_registry_read_failed",
+            }
+
+    def _projection_runtime_detail(
+        self, key: str, *, owner: str, count_key: str, ttl_seconds: int | None = None
+    ) -> dict[str, Any]:
+        counts = self._runtime_state.get("projection_counts")
+        if not isinstance(counts, Mapping):
+            counts = {}
+        observed = _safe_count(counts.get(count_key, 0))
+        raw_details = self._runtime_state.get("projection_details")
+        raw = raw_details.get(key) if isinstance(raw_details, Mapping) else None
+        if raw is not None and not isinstance(raw, Mapping):
+            return {
+                "available": False,
+                "status": "CORRUPTED",
+                "owner": owner,
+                "observed": "Unavailable",
+                "reason": f"{key}_projection_invalid",
+            }
+        status = "AVAILABLE" if observed else "EMPTY"
+        result: dict[str, Any] = {
+            "available": True,
+            "status": status,
+            "owner": owner,
+            "observed": observed,
+            "last_projection_at": self._runtime_state.get("last_projection_at"),
+            "reason": None if observed else f"{key}_projection_empty",
+        }
+        if ttl_seconds is not None:
+            result["ttl_seconds"] = ttl_seconds
+        if isinstance(raw, Mapping):
+            # Only owner metadata is accepted; values and scope are deliberately
+            # omitted even when a caller supplies them in a test fixture.
+            if isinstance(raw.get("last_projection_at"), (int, float)):
+                result["last_projection_at"] = raw["last_projection_at"]
+            if isinstance(raw.get("source_kind"), str):
+                result["source_kind"] = raw["source_kind"][:80]
+            if isinstance(raw.get("reason"), str):
+                result["reason"] = raw["reason"][:160]
+            parameters = raw.get("parameters")
+            if isinstance(parameters, (list, tuple, set, frozenset)):
+                result["parameters"] = sorted(
+                    {item for item in parameters if isinstance(item, str) and item in _SAFE_PREFERENCE_PARAMETERS}
+                )
+        return result
+
+    def _affect_runtime_detail(self, now: float) -> dict[str, Any]:
+        base = {
+            "owner": "astrbot_plugin_affection",
+            "schema": "iris.affect-view.v1",
+            "redacted_fields": ["user_id", "scope", "history", "prompt"],
+            "metrics": [],
+            "labels": {},
+            "generated_at": None,
+            "expires_at": None,
+            "ttl_seconds": None,
+        }
+        raw = self._runtime_state.get("affect_snapshot")
+        if raw is None:
+            return {
+                **base,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "reason": "sanitized_affect_snapshot_not_bound",
+            }
+        if not isinstance(raw, Mapping):
+            return {**base, "available": False, "status": "CORRUPTED", "reason": "affect_snapshot_invalid"}
+        if raw.get("schema") != "iris.affect-view.v1" or raw.get("owner") != "astrbot_plugin_affection":
+            return {**base, "available": False, "status": "CORRUPTED", "reason": "affect_snapshot_contract_mismatch"}
+        generated = raw.get("generated_at")
+        expires = raw.get("expires_at")
+        if (
+            type(generated) not in (int, float)
+            or type(expires) not in (int, float)
+            or not math.isfinite(float(generated))
+            or not math.isfinite(float(expires))
+            or float(expires) <= float(generated)
+            or float(generated) > now
+        ):
+            return {**base, "available": False, "status": "CORRUPTED", "reason": "affect_snapshot_ttl_invalid"}
+        base.update(
+            {
+                "generated_at": float(generated),
+                "expires_at": float(expires),
+                "ttl_seconds": max(0, int(float(expires) - float(generated))),
+            }
+        )
+        if now >= float(expires):
+            return {**base, "available": False, "status": "EXPIRED", "reason": "affect_snapshot_ttl_elapsed"}
+        metrics = []
+        for name, maximum in _SAFE_AFFECT_NUMERIC_FIELDS.items():
+            if name not in raw:
+                continue
+            value = raw[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                or float(value) > maximum
+            ):
+                return {**base, "available": False, "status": "CORRUPTED", "reason": "affect_snapshot_metric_invalid"}
+            metrics.append({"name": name, "value": float(value), "maximum": maximum})
+        labels = {}
+        for name in _SAFE_AFFECT_LABEL_FIELDS:
+            if name in raw:
+                if not isinstance(raw[name], str) or len(raw[name]) > 120:
+                    return {**base, "available": False, "status": "CORRUPTED", "reason": "affect_snapshot_label_invalid"}
+                labels[name] = raw[name]
+        return {
+            **base,
+            "available": True,
+            "status": "AVAILABLE" if metrics or labels else "EMPTY",
+            "metrics": metrics,
+            "labels": labels,
+            "reason": None if metrics or labels else "affect_snapshot_has_no_safe_values",
+        }
+
+    def _feedback_runtime_detail(self, now: float) -> dict[str, Any]:
+        available = self._state_bool("feedback_available")
+        observed = _safe_count(self._runtime_state.get("feedback_observations"))
+        result = {
+            "available": available,
+            "status": "AVAILABLE" if available and observed else "EMPTY" if available else "UNAVAILABLE",
+            "owner": "ResponseLengthFeedbackReviewObserverV1",
+            "observed": observed if available else "Unavailable",
+            "mode": "append-only",
+            "reason": None if available and observed else "feedback_projection_empty" if available else "feedback_observer_unavailable",
+        }
+        raw = self._runtime_state.get("feedback_detail")
+        if raw is not None and not isinstance(raw, Mapping):
+            return {**result, "available": False, "status": "CORRUPTED", "observed": "Unavailable", "reason": "feedback_projection_invalid"}
+        if isinstance(raw, Mapping):
+            states = raw.get("evidence_states")
+            if isinstance(states, Mapping):
+                result["evidence_states"] = {
+                    str(key): _safe_count(value) for key, value in states.items() if isinstance(key, str)
+                }
+            latest = raw.get("latest_observed_at")
+            if isinstance(latest, (int, float)) and math.isfinite(float(latest)):
+                result["latest_observed_at"] = float(latest)
+        return result
+
+    def _preference_runtime_detail(self, now: float) -> dict[str, Any]:
+        """Aggregate injected preference records without cross-scope fields."""
+
+        raw = self._runtime_state.get("response_preference_records")
+        base = {
+            "owner": "ProfileStorage",
+            "redacted_fields": ["scope", "value", "candidate_id", "source_event_id"],
+            "records": [],
+            "status_counts": {},
+            "parameter_counts": {},
+        }
+        if raw is None:
+            return {
+                **base,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "record_count": "Unavailable",
+                "reason": "response_preference_records_not_bound",
+            }
+        if not isinstance(raw, (list, tuple)):
+            return {**base, "available": False, "status": "CORRUPTED", "record_count": "Unavailable", "reason": "response_preference_projection_invalid"}
+        invalid = 0
+        for record in raw:
+            getter = record.get if isinstance(record, Mapping) else lambda name, default=None: getattr(record, name, default)
+            parameter = getter("parameter")
+            if parameter not in _SAFE_PREFERENCE_PARAMETERS:
+                invalid += 1
+                continue
+            status = getter("display_status")
+            if callable(status):
+                try:
+                    status = status(now)
+                except Exception:
+                    status = None
+            if not isinstance(status, str):
+                status = getter("status")
+            if not isinstance(status, str):
+                invalid += 1
+                continue
+            expires = getter("expires_at")
+            if status == "APPROVED" and isinstance(expires, (int, float)) and expires <= now:
+                status = "EXPIRED"
+            source = getter("source")
+            source_kind = source.get("source_kind") if isinstance(source, Mapping) else getattr(source, "source_kind", None)
+            view = {
+                "parameter": parameter,
+                "status": status,
+                "requested_at": getter("requested_at") if isinstance(getter("requested_at"), (int, float)) else None,
+                "approved_at": getter("approved_at") if isinstance(getter("approved_at"), (int, float)) else None,
+                "expires_at": expires if isinstance(expires, (int, float)) else None,
+                "revoked_at": getter("revoked_at") if isinstance(getter("revoked_at"), (int, float)) else None,
+                "suspended_reason": getter("suspended_reason")[:120] if isinstance(getter("suspended_reason"), str) else None,
+                "source_kind": source_kind.split(":", 1)[0] if isinstance(source_kind, str) and source_kind else "unknown",
+            }
+            base["records"].append(view)
+            base["status_counts"][status] = base["status_counts"].get(status, 0) + 1
+            base["parameter_counts"][parameter] = base["parameter_counts"].get(parameter, 0) + 1
+        if invalid and not base["records"]:
+            return {**base, "available": False, "status": "CORRUPTED", "record_count": "Unavailable", "invalid_record_count": invalid, "reason": "response_preference_projection_corrupted"}
+        return {
+            **base,
+            "available": True,
+            "status": "AVAILABLE" if base["records"] else "EMPTY",
+            "record_count": len(base["records"]),
+            "invalid_record_count": invalid,
+            "reason": None if base["records"] else "response_preference_projection_empty",
+        }
+
+    def _p2b_runtime_detail(self) -> dict[str, Any]:
+        projection = dict(self._p2b_shadow_projection())
+        enabled = projection.get("enabled") is True
+        return {
+            "available": enabled,
+            "status": "AVAILABLE" if enabled else "UNAVAILABLE",
+            "owner": "ShadowCandidateEvaluator / append-only journal",
+            "mode": projection.get("mode"),
+            "candidate_status_counts": projection.get("candidate_status_counts", {}),
+            "last_evaluation_at": projection.get("last_evaluation_at"),
+            "allowed_parameters": projection.get("allowed_parameters", []),
+            "permission_effect": projection.get("permission_effect", "NONE"),
+            "reason": None if enabled else "p2b_shadow_store_unavailable",
+            "redacted_fields": ["candidate_id", "scope", "evidence_refs", "value"],
+        }
+
+    def _review_runtime_detail(self, episodes: tuple[Any, ...]) -> dict[str, Any]:
+        if self._review_store is None:
+            return {"available": False, "status": "UNAVAILABLE", "owner": "ReviewStore", "reason": "review_store_not_wired"}
+        try:
+            runs = []
+            evidence_count = 0
+            for episode in episodes:
+                runs.extend(self._review_store.list_review_runs_for_episode(episode.episode_id))
+                evidence_count += len(self._review_store.list_evidence_for_episode(episode.episode_id))
+            return {
+                "available": True,
+                "status": "AVAILABLE" if runs else "EMPTY",
+                "owner": "ReviewStore",
+                "run_count": len(runs),
+                "finding_count": sum(len(run.findings) for run in runs),
+                "evidence_count": evidence_count,
+                "reason": None if runs else "review_store_empty",
+            }
+        except Exception:
+            return {"available": False, "status": "UNAVAILABLE", "owner": "ReviewStore", "reason": "review_store_read_failed"}
 
     def _p2b_shadow_projection(self) -> dict[str, Any]:
         store = self._runtime_state.get("p2b_shadow_store")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -222,6 +223,164 @@ def test_main_episode_observer_wiring_helper(tmp_path, monkeypatch):
     # Avoid cross-test pollution.
     get_cognitive_runtime().episode_observer = None
     reset_cognitive_runtime()
+
+
+@pytest.mark.asyncio
+async def test_main_binds_owner_projections_to_observatory_runtime():
+    """The production request collector is the only source for runtime details."""
+    import main
+    from iris_memory.cognitive.iris_adapter import (
+        get_cognitive_runtime,
+        reset_cognitive_runtime,
+    )
+    from iris_memory.web.routes import observatory as observatory_routes
+
+    reset_cognitive_runtime()
+    runtime = get_cognitive_runtime()
+    now = 1_000_000.0
+
+    class PreferenceStorage:
+        async def active_response_preference_records_for_event(self, _event):
+            return [
+                SimpleNamespace(
+                    parameter="response_length",
+                    value="PRIVATE_VALUE",
+                    candidate_id="PRIVATE_CANDIDATE",
+                    scope=SimpleNamespace(
+                        to_dict=lambda: {
+                            "user_id": "PRIVATE_USER",
+                            "conversation_id": "PRIVATE_SCOPE",
+                        }
+                    ),
+                    source=SimpleNamespace(
+                        source_kind="EXPLICIT_CONTROLLED_REQUEST",
+                        source_event_id="PRIVATE_EVENT",
+                    ),
+                    status="APPROVED",
+                    requested_at=now - 10,
+                    approved_at=now - 5,
+                    expires_at=now + 60,
+                    revoked_at=None,
+                    suspended_reason=None,
+                    display_status=lambda timestamp: "APPROVED" if timestamp < now + 60 else "EXPIRED",
+                )
+            ]
+
+    class FeedbackItem:
+        evidence_state = "ACTIVE"
+
+        def __init__(self):
+            self.occurred_at = datetime.fromtimestamp(now - 2, timezone.utc)
+
+    class Event:
+        message_str = ""
+
+        def get_sender_id(self):
+            return "fictional-user"
+
+        def get_extra(self, key):
+            return (
+                {
+                    "schema": "iris.affect-view.v1",
+                    "owner": "astrbot_plugin_affection",
+                    "user_id": "fictional-user",
+                    "scope": "PRIVATE_SCOPE",
+                    "generated_at": now - 1,
+                    "expires_at": now + 60,
+                    "towards_user": "warm",
+                    "self_state": "steady",
+                    "affection": 99,
+                    "prompt": "PRIVATE_PROMPT",
+                }
+                if key == "iris_affect_view_v1"
+                else None
+            )
+
+    class EmptyEvent(Event):
+        def get_extra(self, key):
+            return (
+                {
+                    "schema": "iris.affect-view.v1",
+                    "owner": "astrbot_plugin_affection",
+                    "user_id": "fictional-user",
+                    "generated_at": now - 120,
+                    "expires_at": now - 60,
+                    "towards_user": "expired",
+                }
+                if key == "iris_affect_view_v1"
+                else None
+            )
+
+    class EmptyStorage:
+        async def active_response_preference_records_for_event(self, _event):
+            return []
+
+    plugin = object.__new__(main.IrisMemoryPlugin)
+    plugin.config = SimpleNamespace(get=lambda _key, default=None: default)
+    plugin._episode_lifecycle_owner = None
+    plugin._episode_lifecycle_registered = False
+    plugin._production_review_store = None
+    plugin._production_review_completion = None
+    plugin._production_review_evidence_enabled = False
+    plugin._production_semantic_evaluator = None
+    plugin._p2r0_archive = None
+    plugin._interaction_trace_observatory = None
+    plugin._response_length_feedback = SimpleNamespace(
+        available=True,
+        observations=(FeedbackItem(),),
+    )
+    plugin._p2b_shadow_store = None
+    plugin._p2b_shadow_last_evaluation_at = None
+    plugin._get_response_preference_storage = lambda: PreferenceStorage()
+
+    try:
+        plugin._sync_observatory_runtime_state()
+        await plugin._collect_cognitive_runtime_views(Event())
+        detail = observatory_routes.get_observatory_service().runtime_detail(now=now)
+
+        assert runtime.observatory_affect_snapshot["towards_user"] == "warm"
+        assert runtime.observatory_affect_snapshot["self_state"] == "steady"
+        assert runtime.observatory_affect_snapshot["affection"] == 99.0
+        assert "user_id" not in runtime.observatory_affect_snapshot
+        assert runtime.observatory_response_preference_records[0]["parameter"] == "response_length"
+        assert "value" not in runtime.observatory_response_preference_records[0]
+        assert runtime.observatory_projection_details["behavioral_prior"]["parameters"] == [
+            "response_length"
+        ]
+        assert runtime.observatory_feedback_detail["evidence_states"]["ACTIVE"] == 1
+        assert detail["details"]["affect"]["status"] == "AVAILABLE"
+        assert detail["details"]["affect"]["labels"] == {
+            "towards_user": "warm",
+            "self_state": "steady",
+        }
+        assert detail["details"]["response_preferences"]["status"] == "AVAILABLE"
+        assert detail["details"]["behavioral_prior"]["status"] == "AVAILABLE"
+        assert detail["details"]["behavioral_prior"]["source_kind"] == "ProfileStorage"
+        assert detail["details"]["feedback_replay"]["evidence_states"] == {
+            "ACTIVE": 1,
+            "REVOKED": 0,
+            "CONFLICTED": 0,
+        }
+        encoded = json.dumps(detail, ensure_ascii=False)
+        for secret in (
+            "PRIVATE_USER",
+            "PRIVATE_SCOPE",
+            "PRIVATE_VALUE",
+            "PRIVATE_CANDIDATE",
+            "PRIVATE_EVENT",
+            "PRIVATE_PROMPT",
+        ):
+            assert secret not in encoded
+
+        plugin._get_response_preference_storage = lambda: EmptyStorage()
+        await plugin._collect_cognitive_runtime_views(EmptyEvent())
+        expired_detail = observatory_routes.get_observatory_service().runtime_detail(now=now)
+        assert runtime.observatory_response_preference_records == []
+        assert runtime.observatory_affect_snapshot["expires_at"] == now - 60
+        assert expired_detail["details"]["affect"]["status"] == "EXPIRED"
+        assert expired_detail["details"]["response_preferences"]["status"] == "EMPTY"
+    finally:
+        reset_cognitive_runtime()
 
 
 @pytest.mark.asyncio

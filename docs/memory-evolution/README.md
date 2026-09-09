@@ -106,3 +106,11 @@ R04 现在从“源码接线、未部署”推进到“生产代码已加载”�
 ## R02 后端 CAS 开发补充
 
 已在 AstrBot 源码中实现 BaseDatabase 可选接口、SQLite BEGIN IMMEDIATE 条件事务、SharedPreferences FIFO CAS 和 PluginKVStoreMixin 接口。限定 response_style_preference:v1；禁止预写缓存、缺记录不创建、冲突返回 False、成功在 commit 后返回。独立连接竞争、队列顺序、缓存读回及故障用例已补，按既有要求未执行。生产尚未安装，历史维护仍关闭。可应用源码补丁、基线哈希和限制见 [CAS 开发说明](../../deploy/astrbot/patches/response-preference-cas.md)。
+
+## 2026-09-09 认知观测台汇总卡详情
+
+本地已完成认知观测台运行态详情视图。原有长期适应卡只有接线状态和匿名计数；现在每张卡都可点击或用回车/空格打开安全详情面板。新增只读接口 `GET /astrbot_plugin_iris_memory/cognitive-observatory/runtime-detail`，使用 `iris.observatory-runtime-detail.v1` 契约汇总 Identity、Relationship、BehavioralPrior、Situation、Affect、反馈重放、回复偏好、P2b、Review、Episode 和 Outcome 的安全字段。
+
+Identity 只显示匿名引用、数量、声明状态、来源类型和时间；Affect 只在 `iris.affect-view.v1`、owner、时间和 TTL 验证通过后显示白名单数值/状态标签；回复偏好只显示白名单参数、状态、时间、来源类型和失效原因。范围标识、用户标识、完整 UID/alias、候选 ID、消息正文、证据原文和存储 payload 不进入响应。空、过期、不可用、损坏分别以 `EMPTY`、`EXPIRED`、`UNAVAILABLE`、`CORRUPTED` 显示；Identity 仅有摘要时显示 `SUMMARY_ONLY`。EpisodeStore 读取失败保持不可用，不以 0 代替。
+
+本地虚构数据验证：后端 `tests/web/test_cognitive_observatory.py` 为 `26 passed, 1 warning`，另有 `tests/cognitive/test_episode_runtime_integration.py::test_main_binds_owner_projections_to_observatory_runtime` 验证 main/runtime/route 的生产组合接线、Affect 过期和偏好空路径；前端 `npm run test:run` 为 `2 files, 11 passed`；`npm run build:check` 的 `vue-tsc` 与 Vite production build 通过。请求 collector 只绑定当前事件经 owner 校验的 Affect `iris.affect-view.v1` 白名单副本、ProfileStorage 已返回的偏好生命周期元数据、Projection 安全摘要和 feedback observer 无正文状态聚合；下一次空请求清除请求态记录，过期 Affect 保留 TTL 外壳以显示 `EXPIRED`。未读取真实用户历史、生产 KV、消息正文、secret/config，未修改 Persona/Affect/Relationship owner 语义，未部署、提交或推送。真实浏览器点击/视觉验收、公开仓库外 affection owner 是否在生产事件上发布同版本快照、真实平台 scope 与 Provider 行为仍未验证。构建保留既有大图 vendor chunk warning。
