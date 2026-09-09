@@ -48,4 +48,4 @@ services:
 networks:
   astrbot:
     external: true
-    name: xiaotianwen-astrbot_default
+    name: astrbot_default
