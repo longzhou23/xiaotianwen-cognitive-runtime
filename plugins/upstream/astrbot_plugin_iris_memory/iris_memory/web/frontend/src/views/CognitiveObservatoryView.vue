@@ -86,28 +86,57 @@
             <div class="text-caption text-medium-emphasis mb-3">来源：{{ adaptiveDetail.owner || '当前 owner 未提供' }}。此面板仅显示脱敏元数据；范围标识、用户标识、消息正文、证据原文和存储 payload 已隐藏。</div>
             <v-alert v-if="!adaptiveDetail.available" :type="adaptiveDetail.status === 'CORRUPTED' ? 'error' : 'warning'" variant="tonal" density="compact" class="mb-3">{{ detailReason(adaptiveDetail.reason) }}</v-alert>
 
-            <template v-if="selectedAdaptiveKey === 'identity'">
-              <v-row dense>
-                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.entity_count ?? '—' }}</div><div class="text-caption">实体</div></v-col>
-                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.claim_count ?? '—' }}</div><div class="text-caption">身份声明</div></v-col>
-                <v-col cols="6" sm="3"><div class="detail-metric">{{ adaptiveDetail.self_present === true ? '是' : adaptiveDetail.self_present === false ? '否' : '—' }}</div><div class="text-caption">SELF 已绑定</div></v-col>
-                <v-col cols="6" sm="3"><div class="detail-metric">{{ formatStatusCount(adaptiveDetail.status_counts) }}</div><div class="text-caption">声明状态</div></v-col>
-              </v-row>
-              <div class="section-label mt-4">实体（匿名引用）</div>
-              <v-table v-if="adaptiveDetail.entities?.length" density="compact">
-                <thead><tr><th>匿名引用</th><th>类型</th><th>别名数量</th><th>平台绑定数</th></tr></thead>
-                <tbody><tr v-for="entity in adaptiveDetail.entities" :key="entity.entity_ref"><td>{{ entity.entity_ref }}</td><td>{{ entity.kind }}</td><td>{{ entity.alias_count }}</td><td>{{ entity.platform_binding_count }}</td></tr></tbody>
-              </v-table>
-              <div v-else class="text-body-2 text-medium-emphasis">{{ detailReason(adaptiveDetail.reason || 'identity_registry_empty') }}</div>
-              <div class="section-label mt-4">声明（不显示别名与证据）</div>
-              <v-table v-if="adaptiveDetail.claims?.length" density="compact">
-                <thead><tr><th>声明引用</th><th>目标</th><th>状态</th><th>置信度</th><th>来源类型</th><th>时间</th></tr></thead>
-                <tbody><tr v-for="claim in adaptiveDetail.claims" :key="claim.claim_ref"><td>{{ claim.claim_ref }}</td><td>{{ claim.candidate_ref }}</td><td>{{ claim.status }}</td><td>{{ claim.confidence ?? '—' }}</td><td>{{ claim.source_kind }}</td><td>{{ formatObservedAt(claim.created_at) }}</td></tr></tbody>
-              </v-table>
-              <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的身份声明。</div>
+            <template v-if="adminRecordKey">
+              <v-alert color="info" variant="tonal" density="compact" class="mb-3">工程详情：仅管理员可见。这里读取已持久化的审计记录，接口为只读；基础视图仍只显示汇总状态。</v-alert>
+              <v-progress-linear v-if="recordLoading" indeterminate color="primary" class="mb-3" />
+              <v-alert v-if="recordError" type="error" variant="tonal" density="compact" class="mb-3">{{ recordError }}</v-alert>
+
+              <template v-if="!recordLoading && !recordError && selectedAdaptiveKey === 'identity'">
+                <v-row dense>
+                  <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.entity_count ?? '—' }}</div><div class="text-caption">实体</div></v-col>
+                  <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.claim_count ?? '—' }}</div><div class="text-caption">身份声明</div></v-col>
+                  <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.status || '—' }}</div><div class="text-caption">记录状态</div></v-col>
+                  <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.pagination?.limit ?? '—' }}</div><div class="text-caption">每页上限</div></v-col>
+                </v-row>
+                <div class="section-label mt-4">实体（管理员工程详情）</div>
+                <v-table v-if="recordDetail?.entities?.length" density="compact">
+                  <thead><tr><th>entity id</th><th>type</th><th>platform_ids</th><th>aliases</th><th>SELF</th></tr></thead>
+                  <tbody><tr v-for="entity in recordDetail.entities" :key="entity.id"><td class="word-break">{{ entity.id }}</td><td>{{ entity.type }}</td><td class="word-break">{{ pretty(entity.platform_ids) }}</td><td class="word-break">{{ entity.aliases?.join('、') || '—' }}</td><td><v-chip size="x-small" :color="entity.self ? 'success' : 'grey'">{{ entity.self ? 'SELF' : '否' }}</v-chip></td></tr></tbody>
+                </v-table>
+                <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的身份实体，或身份库不可用。</div>
+                <div class="section-label mt-4">Identity claims</div>
+                <v-table v-if="recordDetail?.claims?.length" density="compact">
+                  <thead><tr><th>claim_id</th><th>mention</th><th>candidate_entity</th><th>evidence refs</th><th>source</th><th>status</th><th>confidence</th><th>created_at</th></tr></thead>
+                  <tbody><tr v-for="claim in recordDetail.claims" :key="claim.claim_id"><td class="word-break">{{ claim.claim_id }}</td><td>{{ claim.mention }}</td><td class="word-break">{{ claim.candidate_entity }}</td><td class="word-break">{{ claim.evidence?.join('、') || '—' }}</td><td class="word-break">{{ claim.source }}</td><td>{{ claim.status }}</td><td>{{ claim.confidence ?? '—' }}</td><td>{{ formatObservedAt(claim.created_at) }}</td></tr></tbody>
+                </v-table>
+                <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的身份声明。</div>
+                <div class="d-flex align-center justify-end mt-3"><span class="text-caption text-medium-emphasis mr-3">{{ paginationLabel(recordDetail?.pagination?.offset, recordDetail?.pagination?.limit, recordDetail?.pagination?.entities_total, recordDetail?.pagination?.claims_total) }}</span><v-btn size="small" variant="text" :disabled="adminPage === 0" @click="loadAdminIdentity(adminPage - 1)">上一页</v-btn><v-btn size="small" variant="tonal" :disabled="!hasNextIdentity" @click="loadAdminIdentity(adminPage + 1)">下一页</v-btn></div>
+              </template>
+
+              <template v-else-if="!recordLoading && !recordError && selectedAdaptiveKey === 'episodes'">
+                <div class="text-caption text-medium-emphasis mb-3">Episode 内容只来自持久化 `topic_hint` 快照；不会从原始消息数据库补读。完整性状态由后端快照校验返回。</div>
+                <v-table v-if="recordDetail?.episodes?.length" density="compact">
+                  <thead><tr><th>episode_id</th><th>scope_id</th><th>state</th><th>opened / last</th><th>content snapshot</th><th>详情</th></tr></thead>
+                  <tbody><tr v-for="episode in recordDetail.episodes" :key="episode.episode_id" class="record-row"><td class="word-break">{{ episode.episode_id }}</td><td class="word-break">{{ episode.scope_id }}</td><td>{{ episode.state }}</td><td>{{ formatObservedAt(episode.opened_at) }}<br>{{ formatObservedAt(episode.last_activity_at) }}</td><td class="word-break"><span v-if="episode.content_snapshot?.status === 'AVAILABLE'">{{ episode.content_snapshot.text }}</span><span v-else>{{ episode.content_snapshot?.status || 'EMPTY' }}</span><v-chip v-if="episode.content_snapshot?.truncated" size="x-small" color="amber-darken-2" class="ml-1">已截断</v-chip></td><td><v-btn size="x-small" variant="text" @click="loadAdminEpisode(episode.episode_id)">查看</v-btn></td></tr></tbody>
+                </v-table>
+                <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的 Episode，或 EpisodeStore 不可用。</div>
+                <div class="d-flex align-center justify-end mt-3"><span class="text-caption text-medium-emphasis mr-3">{{ paginationLabel(recordDetail?.offset, recordDetail?.limit, recordDetail?.total) }}</span><v-btn size="small" variant="text" :disabled="adminPage === 0" @click="loadAdminEpisodes(adminPage - 1)">上一页</v-btn><v-btn size="small" variant="tonal" :disabled="!hasNextRecords(recordDetail)" @click="loadAdminEpisodes(adminPage + 1)">下一页</v-btn></div>
+                <v-card v-if="selectedRecordDetail" variant="outlined" class="mt-4 pa-3"><div class="d-flex align-center"><div class="section-label mb-0">{{ selectedRecordDetail.episode?.episode_id }}</div><v-spacer /><v-chip size="small" color="info">只读详情</v-chip></div><div class="text-caption text-medium-emphasis">scope_id {{ selectedRecordDetail.episode?.scope_id }} · {{ selectedRecordDetail.episode?.state }}</div><div class="section-label mt-3">不可变内容快照</div><div class="record-content word-break">{{ selectedRecordDetail.episode?.content_snapshot?.text || '没有持久化内容快照' }}<v-chip v-if="selectedRecordDetail.episode?.content_snapshot?.truncated" size="x-small" color="amber-darken-2" class="ml-2">已截断</v-chip></div><div class="text-caption text-medium-emphasis mt-1">状态：{{ selectedRecordDetail.episode?.content_snapshot?.status || 'UNAVAILABLE' }}</div><div class="section-label mt-3">event refs</div><v-table density="compact"><thead><tr><th>ref_id</th><th>kind</th><th>source_event_id</th><th>trace_id</th><th>execution_record_id</th><th>observed_at</th></tr></thead><tbody><tr v-for="ref in selectedRecordDetail.episode?.event_refs || []" :key="ref.ref_id"><td class="word-break">{{ ref.ref_id }}</td><td>{{ ref.kind }}</td><td class="word-break">{{ ref.source_event_id || '—' }}</td><td class="word-break">{{ ref.trace_id || '—' }}</td><td class="word-break">{{ ref.execution_record_id || '—' }}</td><td>{{ formatObservedAt(ref.observed_at) }}</td></tr></tbody></v-table><div class="section-label mt-3">关联 Outcomes</div><div v-if="!selectedRecordDetail.outcomes?.length" class="text-body-2 text-medium-emphasis">没有关联 Outcome。</div><v-card v-for="outcome in selectedRecordDetail.outcomes || []" :key="outcome.observation_id" variant="tonal" class="mb-2 pa-2"><strong>{{ outcome.kind }}</strong> · {{ outcome.observation_id }}<div class="text-caption">{{ outcome.evidence?.join('、') || '无 evidence' }} · {{ formatObservedAt(outcome.observed_at) }}</div></v-card><div class="section-label mt-3">关联 Review</div><pre>{{ pretty(selectedRecordDetail.review || { status: 'UNAVAILABLE' }) }}</pre><div class="section-label mt-3">完整性</div><pre>{{ pretty(selectedRecordDetail.snapshot || { status: 'UNAVAILABLE' }) }}</pre></v-card>
+              </template>
+
+              <template v-else-if="!recordLoading && !recordError && selectedAdaptiveKey === 'outcomes'">
+                <div class="text-caption text-medium-emphasis mb-3">Outcome 是观察记录，不代表奖励或质量判断；下表保留契约中的 evidence 与 provenance。</div>
+                <v-table v-if="recordDetail?.outcomes?.length" density="compact">
+                  <thead><tr><th>observation_id</th><th>target_episode_id</th><th>kind</th><th>observed_at</th><th>source_event_id</th><th>explicitness</th><th>evidence</th><th>详情</th></tr></thead>
+                  <tbody><tr v-for="outcome in recordDetail.outcomes" :key="outcome.observation_id" class="record-row" @click="selectedOutcome = outcome"><td class="word-break">{{ outcome.observation_id }}</td><td class="word-break">{{ outcome.target_episode_id }}</td><td>{{ outcome.kind }}</td><td>{{ formatObservedAt(outcome.observed_at) }}</td><td class="word-break">{{ outcome.source_event_id || '—' }}</td><td>{{ outcome.explicitness }}</td><td class="word-break">{{ outcome.evidence?.join('、') || '—' }}</td><td><v-btn size="x-small" variant="text" @click.stop="selectedOutcome = outcome">查看</v-btn></td></tr></tbody>
+                </v-table>
+                <div v-else class="text-body-2 text-medium-emphasis">当前没有可显示的 Outcome，或 EpisodeStore 不可用。</div>
+                <div class="d-flex align-center justify-end mt-3"><span class="text-caption text-medium-emphasis mr-3">{{ paginationLabel(recordDetail?.offset, recordDetail?.limit, recordDetail?.total) }}</span><v-btn size="small" variant="text" :disabled="adminPage === 0" @click="loadAdminOutcomes(adminPage - 1)">上一页</v-btn><v-btn size="small" variant="tonal" :disabled="!hasNextRecords(recordDetail)" @click="loadAdminOutcomes(adminPage + 1)">下一页</v-btn></div>
+                <v-card v-if="selectedOutcome" variant="outlined" class="mt-4 pa-3"><div class="section-label">Outcome 观察详情</div><v-row dense><v-col cols="12" sm="6"><div class="text-caption">outcome_id</div><div class="word-break">{{ selectedOutcome.observation_id }}</div></v-col><v-col cols="12" sm="6"><div class="text-caption">target_episode_id</div><div class="word-break">{{ selectedOutcome.target_episode_id }}</div></v-col><v-col cols="12" sm="6"><div class="text-caption">provenance</div><div class="word-break">{{ selectedOutcome.provenance?.join('、') || '—' }}</div></v-col><v-col cols="12" sm="6"><div class="text-caption">confidence / producer</div><div>{{ selectedOutcome.confidence ?? '—' }} / {{ selectedOutcome.producer || '—' }}</div></v-col></v-row><div class="text-caption mt-2">evidence</div><div class="record-content word-break">{{ selectedOutcome.evidence?.join('、') || '—' }}</div></v-card>
+              </template>
             </template>
 
-            <template v-else-if="selectedAdaptiveKey === 'affect'">
+             <template v-else-if="selectedAdaptiveKey === 'affect'">
               <v-row dense>
                 <v-col cols="6" sm="3"><div class="detail-metric">{{ formatObservedAt(adaptiveDetail.generated_at) }}</div><div class="text-caption">生成时间</div></v-col>
                 <v-col cols="6" sm="3"><div class="detail-metric">{{ formatObservedAt(adaptiveDetail.expires_at) }}</div><div class="text-caption">失效时间</div></v-col>
@@ -278,14 +307,21 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode, getObservatoryEpisodes, getObservatoryRuntimeDetail, getObservatorySummary, previewObservatoryReview } from '@/api/observatory'
+import { getObservatoryAdminEpisode, getObservatoryAdminEpisodes, getObservatoryAdminIdentity, getObservatoryAdminOutcomes, getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode, getObservatoryEpisodes, getObservatoryRuntimeDetail, getObservatorySummary, previewObservatoryReview } from '@/api/observatory'
 
 const summary = ref<any>(null); const runtimeDetail = ref<any>(null); const episodes = ref<any[]>([]); const demos = ref<any[]>([]); const detail = ref<any>(null); const previewResult = ref<any>(null)
 const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple'); const selectedAdaptiveKey = ref(''); const adaptiveDetailOpen = ref(false)
+const recordDetail = ref<any>(null); const selectedRecordDetail = ref<any>(null); const selectedOutcome = ref<any>(null); const recordLoading = ref(false); const recordError = ref(''); const adminPage = ref(0); const adminPageSize = 20
 const phaseTitle = computed(() => summary.value?.phase || 'Cognitive Observatory')
 const p2bShadow = computed(() => summary.value?.p2b_shadow || null)
 const adaptiveDetail = computed(() => selectedAdaptiveKey.value ? runtimeDetail.value?.details?.[selectedAdaptiveKey.value] || null : null)
 const selectedAdaptiveCard = computed(() => adaptiveCards.value.find(card => card.key === selectedAdaptiveKey.value) || null)
+const adminRecordKey = computed(() => ['identity', 'episodes', 'outcomes'].includes(selectedAdaptiveKey.value))
+const hasNextIdentity = computed(() => {
+  const page = recordDetail.value?.pagination
+  const total = Math.max(Number(page?.entities_total) || 0, Number(page?.claims_total) || 0)
+  return (Number(page?.offset) || 0) + (Number(page?.limit) || adminPageSize) < total
+})
 const adaptiveDetailRows = computed(() => {
   const value = adaptiveDetail.value
   if (!value || typeof value !== 'object') return []
@@ -359,7 +395,42 @@ const formatStatusCount = (value?: Record<string, number>) => {
   const entries = Object.entries(value).filter(([, count]) => typeof count === 'number')
   return entries.length ? entries.map(([status, count]) => `${status} ${count}`).join(' · ') : '—'
 }
-function openAdaptiveDetail(key: string) { selectedAdaptiveKey.value = key; adaptiveDetailOpen.value = true }
+function openAdaptiveDetail(key: string) {
+  selectedAdaptiveKey.value = key
+  adaptiveDetailOpen.value = true
+  recordError.value = ''
+  recordDetail.value = null
+  selectedRecordDetail.value = null
+  selectedOutcome.value = null
+  adminPage.value = 0
+  if (key === 'identity') void loadAdminIdentity(0)
+  if (key === 'episodes') void loadAdminEpisodes(0)
+  if (key === 'outcomes') void loadAdminOutcomes(0)
+}
+async function loadAdminIdentity(page = 0) {
+  recordLoading.value = true; recordError.value = ''; adminPage.value = page
+  try { recordDetail.value = await getObservatoryAdminIdentity({ limit: adminPageSize, offset: page * adminPageSize }) } catch (e: any) { recordError.value = e.message || '读取管理员身份记录失败' } finally { recordLoading.value = false }
+}
+async function loadAdminEpisodes(page = 0) {
+  recordLoading.value = true; recordError.value = ''; adminPage.value = page; selectedRecordDetail.value = null
+  try { recordDetail.value = await getObservatoryAdminEpisodes({ state: state.value, query: query.value, limit: adminPageSize, offset: page * adminPageSize }) } catch (e: any) { recordError.value = e.message || '读取管理员 Episode 记录失败' } finally { recordLoading.value = false }
+}
+async function loadAdminEpisode(id: string) {
+  recordLoading.value = true; recordError.value = ''; selectedRecordDetail.value = null
+  try { selectedRecordDetail.value = await getObservatoryAdminEpisode(id) } catch (e: any) { recordError.value = e.message || '读取管理员 Episode 详情失败' } finally { recordLoading.value = false }
+}
+async function loadAdminOutcomes(page = 0) {
+  recordLoading.value = true; recordError.value = ''; adminPage.value = page; selectedOutcome.value = null
+  try { recordDetail.value = await getObservatoryAdminOutcomes({ limit: adminPageSize, offset: page * adminPageSize }) } catch (e: any) { recordError.value = e.message || '读取管理员 Outcome 记录失败' } finally { recordLoading.value = false }
+}
+const hasNextRecords = (value: any) => Number(value?.offset || 0) + Number(value?.limit || adminPageSize) < (Number(value?.total) || 0)
+const paginationLabel = (offset?: number, limit?: number, ...totals: any[]) => {
+  const total = Math.max(...totals.map(value => Number(value) || 0), 0)
+  if (!total) return totals.some(value => value === 'Unavailable') ? '记录不可用' : '0 条记录'
+  const start = (Number(offset) || 0) + 1
+  const end = Math.min(start + (Number(limit) || adminPageSize) - 1, total)
+  return `${start}-${end} / ${total}`
+}
 async function loadRuntimeDetail() {
   try { runtimeDetail.value = await getObservatoryRuntimeDetail() } catch { runtimeDetail.value = null }
 }

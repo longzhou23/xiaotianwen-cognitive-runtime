@@ -32,6 +32,30 @@ export async function getObservatoryEpisode(id: string): Promise<any> {
   return response
 }
 
+export async function getObservatoryAdminIdentity(params: Record<string, any> = {}): Promise<any> {
+  const response = await apiGet<any>('cognitive-observatory/admin/identity', params)
+  ensure(response, '获取管理员身份记录失败')
+  return response
+}
+
+export async function getObservatoryAdminEpisodes(params: Record<string, any> = {}): Promise<any> {
+  const response = await apiGet<any>('cognitive-observatory/admin/episodes', params)
+  ensure(response, '获取管理员 Episode 记录失败')
+  return response
+}
+
+export async function getObservatoryAdminEpisode(id: string): Promise<any> {
+  const response = await apiGet<any>(`cognitive-observatory/admin/episodes/${id}`)
+  ensure(response, '获取管理员 Episode 详情失败')
+  return response
+}
+
+export async function getObservatoryAdminOutcomes(params: Record<string, any> = {}): Promise<any> {
+  const response = await apiGet<any>('cognitive-observatory/admin/outcomes', params)
+  ensure(response, '获取管理员 Outcome 记录失败')
+  return response
+}
+
 export async function previewObservatoryReview(id: string): Promise<any> {
   const response = await apiPost<any>(`cognitive-observatory/episodes/${id}/preview`, {})
   ensure(response, '预览 Review 失败')

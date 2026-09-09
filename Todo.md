@@ -769,3 +769,19 @@ G4：Observatory。
 未验证：真实浏览器人工点击/视觉验收、公开仓库外 affection owner 是否在生产事件上发布同版本快照、真实平台 scope 与 Provider 行为；本地生产组合测试已证明 main/runtime/route 的绑定链和过期/空路径。未部署、提交或推送。前端构建保留既有大图 vendor chunk warning，不影响构建状态。
 
 下一张卡：等待真实运行态 owner 提供同版本脱敏详情后再做只读接线验收；不得因此开放历史写入或自动学习。
+
+## 2026-09-09 管理员逐条审计记录视图
+
+状态：完成（本地源码、虚构数据、前端类型检查和生产构建已验证）
+
+具体缺口：运行态详情此前只提供身份匿名计数，Episode/Outcome 只在 Episode 详情中有限展示；管理员不能在观测台分页查看每个 Identity、Episode 和 Outcome 的实际契约字段。
+
+实际改动：`observatory_service.py` 增加版本化只读 `iris.observatory-admin-identity.v1`、`iris.observatory-admin-episode.v1`、`iris.observatory-admin-outcome.v1` 投影；`observatory.py` 增加管理员身份、Episode 列表/详情、Outcome 列表 GET 路由；现有 `manage/identity` 改为复用同一递归脱敏、分页读模型并保留原管理 schema。Identity 展示 `id/type/platform_ids/aliases/self` 与 claim 的 `claim_id/mention/candidate_entity/evidence/source/status/confidence/created_at`；Episode 展示 `episode_id/scope_id/state/root_event_id/opened_at/last_activity_at/finalized_at/provenance/event_refs`、已持久化 `topic_hint` 内容快照及截断/完整性状态，并关联 Outcome、Review 和 Snapshot；Outcome 展示 `observation_id/target_episode_id/kind/observed_at/source_event_id/source_ref_id/explicitness/confidence/evidence/producer/provenance`。
+
+安全边界：响应只由现有 Identity/EntityRegistry、EpisodeStore、OutcomeObservation、ReviewStore 和 Snapshot 合同生成；不读取原始消息库、生产配置或 KV payload，不写入任何记录，不调用确认/撤销/发布。管理员投影递归屏蔽 secret/token/password/api_key/cookie/authorization/private key 等敏感字段和值；未知对象保持不可用类型标记，不使用 repr。内容仅取已持久化 `Episode.topic_hint`，每条上限 240 字符并声明 `truncated`。
+
+验证：管理员 Web 聚焦 `tests/web/test_cognitive_observatory.py` 与管理路由回归 `30 passed, 1 warning`；前端 `npm run test:run` 为 `2 files, 13 passed`；`npm run build:check` 的 `vue-tsc` 与 Vite production build 通过；相关 Python `compileall` 通过。虚构数据覆盖字段、分页、内容截断、Outcome 观察字段、敏感键和值递归屏蔽、空/损坏/不可用和只读存储前后不变。
+
+未验证：真实浏览器逐项点击/视觉验收、真实管理员权限链、真实生产 Identity/ Episode/Outcome 数据和线上消息正文可见性均未执行；未部署、提交或推送。前端构建保留既有大图 vendor chunk 提示。
+
+下一张卡：真实运行态只读浏览验收；继续保持历史写入、自动批准和自动发布关闭。

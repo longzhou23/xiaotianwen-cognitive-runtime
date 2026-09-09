@@ -8,6 +8,10 @@ const { apiGet, apiPost } = vi.hoisted(() => ({
 vi.mock('./request', () => ({ apiGet, apiPost }))
 
 import {
+  getObservatoryAdminEpisode,
+  getObservatoryAdminEpisodes,
+  getObservatoryAdminIdentity,
+  getObservatoryAdminOutcomes,
   getObservatoryRuntimeDetail,
   getObservatoryEpisode,
   getObservatoryEpisodes,
@@ -68,5 +72,35 @@ describe('Cognitive Observatory runtime details', () => {
     apiGet.mockResolvedValue({ success: false, error: 'runtime detail unavailable' })
 
     await expect(getObservatoryRuntimeDetail()).rejects.toThrow('runtime detail unavailable')
+  })
+})
+
+describe('Cognitive Observatory administrator record endpoints', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  it('passes bounded paging parameters for Identity, Episode, and Outcome records', async () => {
+    apiGet
+      .mockResolvedValueOnce({ success: true, schema: 'iris.observatory-admin-identity.v1' })
+      .mockResolvedValueOnce({ success: true, schema: 'iris.observatory-admin-episode.v1' })
+      .mockResolvedValueOnce({ success: true, schema: 'iris.observatory-admin-outcome.v1' })
+      .mockResolvedValueOnce({ success: true, schema: 'iris.observatory-admin-episode.v1', episode: {} })
+
+    await getObservatoryAdminIdentity({ limit: 20, offset: 40 })
+    await getObservatoryAdminEpisodes({ limit: 20, offset: 40, state: 'FINALIZED' })
+    await getObservatoryAdminOutcomes({ limit: 20, offset: 40 })
+    await getObservatoryAdminEpisode('episode:admin:1')
+
+    expect(apiGet).toHaveBeenNthCalledWith(1, 'cognitive-observatory/admin/identity', { limit: 20, offset: 40 })
+    expect(apiGet).toHaveBeenNthCalledWith(2, 'cognitive-observatory/admin/episodes', { limit: 20, offset: 40, state: 'FINALIZED' })
+    expect(apiGet).toHaveBeenNthCalledWith(3, 'cognitive-observatory/admin/outcomes', { limit: 20, offset: 40 })
+    expect(apiGet).toHaveBeenNthCalledWith(4, 'cognitive-observatory/admin/episodes/episode:admin:1')
+  })
+
+  it('fails closed when an administrator record endpoint is unavailable', async () => {
+    apiGet.mockResolvedValue({ success: false, error: 'admin records unavailable' })
+    await expect(getObservatoryAdminIdentity()).rejects.toThrow('admin records unavailable')
   })
 })

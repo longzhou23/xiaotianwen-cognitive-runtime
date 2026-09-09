@@ -491,6 +491,183 @@ def test_runtime_detail_redacts_identity_affect_and_preference_payloads() -> Non
         assert secret not in encoded
 
 
+def test_admin_record_views_project_contract_fields_paging_content_and_redaction() -> None:
+    registry = EntityRegistry()
+    registry.register_entity(
+        CanonicalEntity(
+            "person:qq:admin-record-user",
+            aliases=("管理员可见别名",),
+            platform_ids={"qq": "admin-record-uid"},
+        ),
+        source="admin:operator",
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="审计别名",
+            candidate_entity="person:qq:admin-record-user",
+            evidence=("evidence:alias-review-1",),
+            confidence=0.75,
+            source="admin:operator",
+            status=IdentityClaimStatus.CONFIRMED,
+        )
+    )
+    store = InMemoryEpisodeStore()
+    episodes = []
+    for number in range(2):
+        content = ("persisted audit content " + ("x" * 300)) if number == 0 else "short content"
+        episode = Episode(
+            f"episode:admin:{number}",
+            "private:admin-audit",
+            EpisodeState.FINALIZED,
+            f"event:admin:{number}",
+            NOW,
+            NOW + timedelta(minutes=number),
+            event_refs=(EpisodeEventRef(
+                f"EXPERIENCE:event:admin:{number}",
+                EpisodeEventKind.EXPERIENCE,
+                f"event:admin:{number}",
+                observed_at=NOW,
+            ),),
+            topic_hint=content,
+            finalized_at=NOW,
+            provenance=("episode_shadow_observer",),
+        )
+        store.create_episode(episode)
+        outcome = OutcomeObservation(
+            f"outcome:admin:{number}",
+            episode.episode_id,
+            OutcomeKind.ANSWER_OBSERVED,
+            NOW,
+            source_event_id=f"event:admin:{number}",
+            source_ref_id=f"EXPERIENCE:event:admin:{number}",
+            explicitness=OutcomeExplicitness.STRUCTURAL,
+            confidence=0.5,
+            evidence=("answer_observed",),
+            provenance=("outcome_collector",),
+        )
+        store.record_outcome(outcome)
+        episodes.append(episode)
+
+    service = P1ObservatoryService(
+        store,
+        runtime_state={"identity_available": True, "identity_registry": registry},
+    )
+    identity_page = service.admin_identity(limit=1, offset=1)
+    assert identity_page["schema"] == "iris.observatory-admin-identity.v1"
+    assert identity_page["pagination"] == {
+        "limit": 1,
+        "offset": 1,
+        "entities_total": 2,
+        "claims_total": 3,
+    }
+    assert len(identity_page["entities"]) == 1
+    entity = identity_page["entities"][0]
+    assert entity["id"] == "person:qq:admin-record-user"
+    assert entity["type"] == "person"
+    assert entity["platform_ids"] == {"qq": "admin-record-uid"}
+    assert entity["aliases"] == ["管理员可见别名"]
+    assert entity["self"] is False
+    claim_page = service.admin_identity(limit=1, offset=2)
+    claim = claim_page["claims"][0]
+    assert set(claim) >= {"claim_id", "mention", "candidate_entity", "evidence", "source", "status", "confidence", "created_at"}
+
+    listing = service.admin_episodes(limit=1, offset=1)
+    assert listing["schema"] == "iris.observatory-admin-episode.v1"
+    assert listing["total"] == 2
+    assert len(listing["episodes"]) == 1
+    assert "topic_hint" not in listing["episodes"][0]
+    assert listing["episodes"][0]["content_snapshot"]["truncated"] is True
+    assert len(listing["episodes"][0]["content_snapshot"]["text"]) == 240
+
+    before = store.get_episode(episodes[0].episode_id), store.get_outcomes()
+    detail = service.admin_episode_detail(episodes[0].episode_id)
+    assert detail["read_only"] is True
+    assert detail["episode"]["scope_id"] == "private:admin-audit"
+    assert "topic_hint" not in detail["episode"]
+    assert detail["episode"]["event_refs"][0]["source_event_id"] == "event:admin:0"
+    assert detail["outcomes"][0]["evidence"] == ["answer_observed"]
+    assert detail["episode"]["content_snapshot"]["truncated"] is True
+    assert detail["snapshot"]["fact_deep_snapshotted"] is True
+    assert (store.get_episode(episodes[0].episode_id), store.get_outcomes()) == before
+
+    outcomes = service.admin_outcomes(limit=1, offset=1)
+    assert outcomes["schema"] == "iris.observatory-admin-outcome.v1"
+    assert outcomes["total"] == 2
+    assert len(outcomes["outcomes"]) == 1
+    assert outcomes["outcomes"][0]["target_episode_id"].startswith("episode:admin:")
+
+
+def test_admin_record_views_redact_sensitive_keys_and_values_fail_closed() -> None:
+    pem_header = "-----BEGIN RSA PRIVATE KEY-----"
+    bearer = "Bearer abcdefghijklmnop123456"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12345678"
+    openai_key = "sk-proj-abcdefghijklmnop1234567890"
+    cookie = "Cookie: sessionid=abcdefghijklmnop123456"
+    long_alias = "long-alias-" + ("y" * 600)
+    registry = EntityRegistry()
+    registry.register_entity(
+        CanonicalEntity(
+            "person:qq:safe-admin",
+            aliases=("token-user-1", pem_header, bearer, jwt, openai_key, cookie, long_alias),
+        ),
+        source="admin:operator",
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="safe mention",
+            candidate_entity="person:qq:safe-admin",
+            evidence=("SECRET EVIDENCE TEXT", pem_header, bearer, jwt, openai_key, cookie),
+            confidence=1.0,
+            source=bearer,
+        )
+    )
+    store = InMemoryEpisodeStore()
+    episode = Episode(
+        "episode:admin:redaction",
+        "private:admin-audit",
+        EpisodeState.FINALIZED,
+        "event:redaction",
+        NOW,
+        NOW,
+        topic_hint=f"ordinary persisted content {openai_key}",
+        finalized_at=NOW,
+    )
+    store.create_episode(episode)
+    store.record_outcome(OutcomeObservation(
+        "outcome:admin:redaction",
+        episode.episode_id,
+        OutcomeKind.ANSWER_OBSERVED,
+        NOW,
+        evidence=("token=SECRET_VALUE",),
+    ))
+    service = P1ObservatoryService(
+        store,
+        runtime_state={"identity_available": True, "identity_registry": registry},
+    )
+    encoded = json.dumps(
+        {
+            "identity": service.admin_identity(),
+            "episodes": service.admin_episodes(),
+            "episode": service.admin_episode_detail(episode.episode_id),
+            "outcomes": service.admin_outcomes(),
+        },
+        ensure_ascii=False,
+    )
+    assert "SECRET EVIDENCE TEXT" not in encoded
+    for secret in (pem_header, bearer, jwt, openai_key, cookie):
+        assert secret not in encoded
+    assert "SECRET_VALUE" not in encoded
+    assert "[REDACTED]" in encoded
+    assert "token-user-1" in encoded
+    assert "topic_hint" not in json.dumps(service.admin_episodes(), ensure_ascii=False)
+    assert "...[TRUNCATED]" in encoded
+    safe_entity = next(
+        entity for entity in service.admin_identity()["entities"]
+        if entity["id"] == "person:qq:safe-admin"
+    )
+    assert len(safe_entity["aliases"][-1]) <= 512
+
+
 def test_runtime_detail_distinguishes_empty_expired_and_unavailable_sources() -> None:
     empty = P1ObservatoryService(
         InMemoryEpisodeStore(),
@@ -661,6 +838,18 @@ async def test_routes_return_json_and_error_statuses(monkeypatch):
     runtime_detail = await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/runtime-detail")).get_json()
     assert runtime_detail["success"] is True
     assert runtime_detail["detail"]["schema_version"] == "iris.observatory-runtime-detail.v1"
+    admin_identity = await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/admin/identity?limit=1")).get_json()
+    assert admin_identity["success"] is True
+    assert admin_identity["schema"] == "iris.observatory-admin-identity.v1"
+    admin_episodes = await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/admin/episodes?limit=1")).get_json()
+    assert admin_episodes["success"] is True
+    assert admin_episodes["schema"] == "iris.observatory-admin-episode.v1"
+    admin_outcomes = await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/admin/outcomes?limit=1")).get_json()
+    assert admin_outcomes["success"] is True
+    assert admin_outcomes["schema"] == "iris.observatory-admin-outcome.v1"
+    admin_detail = await (await client.get(f"/astrbot_plugin_iris_memory/cognitive-observatory/admin/episodes/{episode.episode_id}")).get_json()
+    assert admin_detail["success"] is True
+    assert admin_detail["read_only"] is True
     assert (await (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/episodes?state=BAD")).get_json())["success"] is False
     assert (await client.get("/astrbot_plugin_iris_memory/cognitive-observatory/episodes/missing")).status_code == 404
     preview = await (await client.post(f"/astrbot_plugin_iris_memory/cognitive-observatory/episodes/{episode.episode_id}/preview")).get_json()

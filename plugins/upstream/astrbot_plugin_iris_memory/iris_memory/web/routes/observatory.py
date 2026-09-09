@@ -83,6 +83,76 @@ async def observatory_episodes():
         return jsonify({"success": False, "error": str(exc)}), 400
 
 
+async def observatory_admin_identity():
+    try:
+        service = get_observatory_service()
+        return jsonify(
+            {
+                "success": True,
+                **service.admin_identity(
+                    limit=request.args.get("limit", 50),
+                    offset=request.args.get("offset", 0),
+                ),
+                "read_only": True,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+async def observatory_admin_episodes():
+    try:
+        service = get_observatory_service()
+        return jsonify(
+            {
+                "success": True,
+                **service.admin_episodes(
+                    state=request.args.get("state"),
+                    query=request.args.get("query"),
+                    limit=request.args.get("limit", 50),
+                    offset=request.args.get("offset", 0),
+                ),
+                "read_only": True,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+async def observatory_admin_episode_detail(episode_id: str):
+    try:
+        return jsonify(
+            {
+                "success": True,
+                **get_observatory_service().admin_episode_detail(episode_id),
+                "read_only": True,
+            }
+        )
+    except KeyError:
+        return jsonify({"success": False, "error": "episode not found"}), 404
+    except RuntimeError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 503
+
+
+async def observatory_admin_outcomes():
+    try:
+        service = get_observatory_service()
+        return jsonify(
+            {
+                "success": True,
+                **service.admin_outcomes(
+                    episode_id=request.args.get("episode_id"),
+                    query=request.args.get("query"),
+                    limit=request.args.get("limit", 50),
+                    offset=request.args.get("offset", 0),
+                ),
+                "read_only": True,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 async def observatory_episode_detail(episode_id: str):
     try:
         return jsonify({"success": True, **get_observatory_service().episode_detail(episode_id)})
@@ -119,6 +189,10 @@ def register_observatory_routes(context) -> None:
         (f"{prefix}/runtime-detail", observatory_runtime_detail, ["GET"], "获取运行态脱敏详情"),
         (f"{prefix}/episodes", observatory_episodes, ["GET"], "获取 Episode 列表"),
         (f"{prefix}/episodes/<episode_id>", observatory_episode_detail, ["GET"], "获取 Episode 详情"),
+        (f"{prefix}/admin/identity", observatory_admin_identity, ["GET"], "管理员读取身份记录（只读）"),
+        (f"{prefix}/admin/episodes", observatory_admin_episodes, ["GET"], "管理员读取 Episode 记录（只读）"),
+        (f"{prefix}/admin/episodes/<episode_id>", observatory_admin_episode_detail, ["GET"], "管理员读取 Episode 详情（只读）"),
+        (f"{prefix}/admin/outcomes", observatory_admin_outcomes, ["GET"], "管理员读取 Outcome 记录（只读）"),
         (f"{prefix}/episodes/<episode_id>/preview", observatory_preview, ["POST"], "预览 Review（不持久化）"),
         (f"{prefix}/demo-cases", observatory_demo_cases, ["GET"], "获取 P1 演示案例"),
         (f"{prefix}/demo-cases/<case_id>", observatory_demo_case, ["GET"], "获取 P1 演示案例详情"),

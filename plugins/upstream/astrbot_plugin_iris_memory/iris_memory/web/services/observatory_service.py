@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hashlib
 import math
+import re
 import time
 from typing import Any, Mapping
 
@@ -58,6 +59,38 @@ def _timestamp(value: datetime | None) -> str | None:
 
 
 _RUNTIME_DETAIL_SCHEMA = "iris.observatory-runtime-detail.v1"
+_ADMIN_IDENTITY_SCHEMA = "iris.observatory-admin-identity.v1"
+_ADMIN_EPISODE_SCHEMA = "iris.observatory-admin-episode.v1"
+_ADMIN_OUTCOME_SCHEMA = "iris.observatory-admin-outcome.v1"
+_ADMIN_CONTENT_LIMIT = 240
+_ADMIN_PAGE_LIMIT = 200
+_ADMIN_STRING_LIMIT = 512
+_ADMIN_TRUNCATION_MARKER = "...[TRUNCATED]"
+_SENSITIVE_NAME_MARKERS = (
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "cookie",
+    "authorization",
+    "private_key",
+    "privatekey",
+    "bearer",
+    "credential",
+)
+_SENSITIVE_VALUE_PATTERNS = (
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9])(?:AIza|gh[pousr]_)[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9])(?:xox[baprs]-|glpat-|npm_|hf_|pypi-)[A-Za-z0-9._-]{16,}(?![A-Za-z0-9])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"),
+    re.compile(r"\bcookie\s*[:=]\s*[^\s;]{8,}", re.IGNORECASE),
+    re.compile(r"\b(?:cookie\s*[:=]\s*)?(?:session(?:id)?|sid|phpsessid|connect\.sid|auth(?:entication)?|refresh_token)\s*=\s*[^\s;]{8,}", re.IGNORECASE),
+    re.compile(r"\b(?:secret|token|password|api[_ -]?key|authorization|credential)\s*[:=]\s*[^\s,;]{8,}", re.IGNORECASE),
+)
 _SAFE_AFFECT_NUMERIC_FIELDS = {
     "affection": 100.0,
     "current_libido_other": 50.0,
@@ -87,6 +120,82 @@ def _safe_count(value: object, default: int = 0) -> int:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _admin_sensitive_name(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.casefold().replace("-", "_").replace(" ", "_")
+    return any(marker in normalized for marker in _SENSITIVE_NAME_MARKERS)
+
+
+def _admin_sensitive_value(value: str) -> bool:
+    marker_word = re.search(
+        r"(?<![A-Za-z0-9_-])(?:secret|token|password|api[_ -]?key|cookie|authorization|private[ _-]?key|bearer|credential)(?![A-Za-z0-9_-])",
+        value,
+        re.IGNORECASE,
+    )
+    return bool(marker_word or any(pattern.search(value) for pattern in _SENSITIVE_VALUE_PATTERNS))
+
+
+def _admin_bounded_string(value: str) -> str:
+    if len(value) <= _ADMIN_STRING_LIMIT:
+        return value
+    keep = _ADMIN_STRING_LIMIT - len(_ADMIN_TRUNCATION_MARKER)
+    return value[:keep] + _ADMIN_TRUNCATION_MARKER
+
+
+def _admin_redact(value: object, *, _key: str | None = None, _depth: int = 0) -> Any:
+    """Return a detached admin projection with recursive secret redaction.
+
+    Admin record views may expose IDs, aliases, scopes, and evidence refs, but
+    a malformed/future contract must not make arbitrary values or repr output
+    reachable from the Web API.  Redaction is intentionally applied after the
+    existing contract-only JSON conversion so unknown objects remain an
+    ``unavailable_type`` marker rather than an object representation.
+    """
+    if _depth > 12:
+        return "[REDACTED_DEPTH_LIMIT]"
+    if _key is not None and _admin_sensitive_name(_key):
+        return "[REDACTED]"
+    if isinstance(value, str):
+        return "[REDACTED]" if _admin_sensitive_value(value) else _admin_bounded_string(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _admin_redact(item, _key=str(key), _depth=_depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_admin_redact(item, _depth=_depth + 1) for item in value]
+    return value
+
+
+def _admin_json(value: object) -> Any:
+    return _admin_redact(_json_value(value))
+
+
+def _admin_page(limit: object, offset: object) -> tuple[int, int]:
+    try:
+        bounded_limit = min(max(int(limit), 1), _ADMIN_PAGE_LIMIT)
+        bounded_offset = max(int(offset), 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid pagination") from exc
+    return bounded_limit, bounded_offset
+
+
+def _admin_content_snapshot(value: object) -> dict[str, Any]:
+    """Project only the persisted Episode.topic_hint content carrier."""
+    if value is None:
+        return {"status": "EMPTY", "text": None, "truncated": False}
+    if not isinstance(value, str):
+        return {"status": "CORRUPTED", "text": None, "truncated": False}
+    truncated = len(value) > _ADMIN_CONTENT_LIMIT
+    clipped = value[:_ADMIN_CONTENT_LIMIT]
+    return {
+        "status": "AVAILABLE" if clipped else "EMPTY",
+        "text": _admin_redact(clipped),
+        "truncated": truncated,
+    }
 
 
 class P1ObservatoryService:
@@ -739,6 +848,257 @@ class P1ObservatoryService:
         total = len(items)
         return {"available": True, "episodes": items[offset : offset + limit], "total": total, "limit": limit, "offset": offset}
 
+    def admin_identity(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """Return the bounded, administrator-only Identity record listing.
+
+        This endpoint is still a read model.  It exposes the Identity contract
+        fields needed for audit (including aliases and platform bindings), but
+        never calls a registry mutation method and never returns the registry
+        storage envelope.
+        """
+        limit, offset = _admin_page(limit, offset)
+        registry = self._runtime_state.get("identity_registry")
+        base = {
+            "schema": _ADMIN_IDENTITY_SCHEMA,
+            "available": False,
+            "status": "UNAVAILABLE",
+            "entities": [],
+            "claims": [],
+            "entity_count": "Unavailable",
+            "claim_count": "Unavailable",
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "entities_total": "Unavailable",
+                "claims_total": "Unavailable",
+            },
+            "reason": "identity_registry_not_bound",
+        }
+        if registry is None:
+            if self._state_bool("identity_available"):
+                base["status"] = "SUMMARY_ONLY"
+                base["reason"] = "identity_registry_not_bound"
+            return base
+        if getattr(registry, "available", True) is not True:
+            base["reason"] = "identity_registry_corrupted_or_unavailable"
+            return base
+        try:
+            entities = tuple(registry.entities())
+            claims = tuple(registry.all_claims())
+            self_entity = str(getattr(registry, "self_entity", ""))
+            entity_views = [
+                _admin_json(
+                    {
+                        "id": entity.id,
+                        "type": entity.id.split(":", 1)[0] if ":" in entity.id else "unknown",
+                        "platform_ids": dict(entity.platform_ids),
+                        "aliases": list(entity.aliases),
+                        "self": entity.id == self_entity,
+                    }
+                )
+                for entity in entities
+            ]
+            claim_views = [
+                _admin_json(
+                    {
+                        "claim_id": registry.claim_id(claim),
+                        "mention": claim.mention,
+                        "candidate_entity": claim.candidate_entity,
+                        "evidence": list(claim.evidence),
+                        "source": claim.source,
+                        "status": claim.status.value,
+                        "confidence": claim.confidence,
+                        "created_at": claim.created_at,
+                    }
+                )
+                for claim in claims
+            ]
+            status = "AVAILABLE" if entities or claims else "EMPTY"
+            return {
+                "schema": _ADMIN_IDENTITY_SCHEMA,
+                "available": True,
+                "status": status,
+                "entities": entity_views[offset : offset + limit],
+                "claims": claim_views[offset : offset + limit],
+                "entity_count": len(entities),
+                "claim_count": len(claims),
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "entities_total": len(entities),
+                    "claims_total": len(claims),
+                },
+                "reason": "identity_registry_empty" if status == "EMPTY" else None,
+            }
+        except Exception:
+            return {
+                **base,
+                "status": "CORRUPTED",
+                "reason": "identity_registry_read_failed",
+            }
+
+    def admin_episodes(
+        self,
+        *,
+        state: str | None = None,
+        query: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return bounded Episode records for an authenticated admin view."""
+        limit, offset = _admin_page(limit, offset)
+        if self._episode_store is None:
+            return {
+                "schema": _ADMIN_EPISODE_SCHEMA,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "episodes": [],
+                "total": "Unavailable",
+                "limit": limit,
+                "offset": offset,
+                "reason": "episode_store_not_wired",
+            }
+        try:
+            wanted = EpisodeState(state) if state and state != "ALL" else None
+        except ValueError as exc:
+            raise ValueError("invalid episode state") from exc
+        needle = (query or "").strip().casefold()
+        try:
+            selected = []
+            for episode in self._episode_store.all_episodes():
+                if wanted and episode.state is not wanted:
+                    continue
+                searchable = " ".join(
+                    [episode.episode_id, episode.scope_id, episode.root_event_id]
+                    + [ref.ref_id for ref in episode.event_refs]
+                ).casefold()
+                if needle and needle not in searchable:
+                    continue
+                outcomes = self._episode_store.get_outcomes(episode.episode_id)
+                selected.append(self._admin_episode_summary(episode, outcomes))
+            selected.sort(key=lambda item: (item["last_activity_at"] or "", item["episode_id"]), reverse=True)
+            return {
+                "schema": _ADMIN_EPISODE_SCHEMA,
+                "available": True,
+                "status": "AVAILABLE" if selected else "EMPTY",
+                "episodes": selected[offset : offset + limit],
+                "total": len(selected),
+                "limit": limit,
+                "offset": offset,
+                "reason": None if selected else "episode_store_empty",
+            }
+        except Exception:
+            return {
+                "schema": _ADMIN_EPISODE_SCHEMA,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "episodes": [],
+                "total": "Unavailable",
+                "limit": limit,
+                "offset": offset,
+                "reason": "episode_store_read_failed",
+            }
+
+    def admin_episode_detail(self, episode_id: str) -> dict[str, Any]:
+        """Return one Episode plus its read-only Outcome/Review associations."""
+        episode = self._require_episode(episode_id)
+        try:
+            outcomes = tuple(self._episode_store.get_outcomes(episode_id))  # type: ignore[union-attr]
+        except Exception as exc:
+            raise RuntimeError("episode_store_read_failed") from exc
+        persisted = self._persisted_review(episode_id)
+        try:
+            snapshot = self.snapshot_debug_view(episode_id)
+            attachments = self._attachment_views(episode, outcomes)
+            archive = self._persisted_archive(episode_id)
+        except Exception:
+            snapshot = {"available": False, "status": "UNAVAILABLE", "reason": "episode_snapshot_read_failed"}
+            attachments = []
+            archive = {"available": False, "status": "UNAVAILABLE", "count": "Unavailable", "archives": []}
+        return {
+            "schema": _ADMIN_EPISODE_SCHEMA,
+            "available": True,
+            "status": "AVAILABLE",
+            "episode": self._admin_episode_view(episode),
+            "outcomes": [self._admin_outcome_view(outcome, episode) for outcome in outcomes],
+            "review": _admin_json(persisted),
+            "snapshot": _admin_json(snapshot),
+            "attachments": _admin_json(attachments),
+            "archive": _admin_json(archive),
+            "read_only": True,
+        }
+
+    def admin_outcomes(
+        self,
+        *,
+        episode_id: str | None = None,
+        query: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return bounded OutcomeObservation records, preserving contract data."""
+        limit, offset = _admin_page(limit, offset)
+        if self._episode_store is None:
+            return {
+                "schema": _ADMIN_OUTCOME_SCHEMA,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "outcomes": [],
+                "total": "Unavailable",
+                "limit": limit,
+                "offset": offset,
+                "reason": "episode_store_not_wired",
+            }
+        needle = (query or "").strip().casefold()
+        try:
+            outcomes = tuple(self._episode_store.get_outcomes(episode_id))
+            if needle:
+                outcomes = tuple(
+                    outcome
+                    for outcome in outcomes
+                    if needle in " ".join(
+                        filter(
+                            None,
+                            (
+                                outcome.observation_id,
+                                outcome.target_episode_id,
+                                outcome.kind.value,
+                                outcome.source_event_id,
+                                outcome.source_ref_id,
+                            ),
+                        )
+                    ).casefold()
+                )
+            episode_map = {
+                episode.episode_id: episode for episode in self._episode_store.all_episodes()
+            }
+            views = [
+                self._admin_outcome_view(outcome, episode_map.get(outcome.target_episode_id))
+                for outcome in outcomes
+            ]
+            views.sort(key=lambda item: (item["observed_at"] or "", item["observation_id"]), reverse=True)
+            return {
+                "schema": _ADMIN_OUTCOME_SCHEMA,
+                "available": True,
+                "status": "AVAILABLE" if views else "EMPTY",
+                "outcomes": views[offset : offset + limit],
+                "total": len(views),
+                "limit": limit,
+                "offset": offset,
+                "reason": None if views else "outcome_store_empty",
+            }
+        except Exception:
+            return {
+                "schema": _ADMIN_OUTCOME_SCHEMA,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "outcomes": [],
+                "total": "Unavailable",
+                "limit": limit,
+                "offset": offset,
+                "reason": "outcome_store_read_failed",
+            }
+
     def episode_detail(self, episode_id: str) -> dict[str, Any]:
         episode = self._require_episode(episode_id)
         outcomes = self._episode_store.get_outcomes(episode_id)  # type: ignore[union-attr]
@@ -1041,6 +1401,75 @@ class P1ObservatoryService:
         }
         payload["late_feedback"] = self._is_late(outcome, episode)
         return payload
+
+    @staticmethod
+    def _admin_episode_summary(
+        episode: Episode, outcomes: tuple[OutcomeObservation, ...]
+    ) -> dict[str, Any]:
+        return _admin_json(
+            {
+                "episode_id": episode.episode_id,
+                "scope_id": episode.scope_id,
+                "state": episode.state.value,
+                "root_event_id": episode.root_event_id,
+                "opened_at": episode.opened_at,
+                "last_activity_at": episode.last_activity_at,
+                "soft_closed_at": episode.soft_closed_at,
+                "finalized_at": episode.finalized_at,
+                "event_count": len(episode.event_refs),
+                "outcome_count": len(outcomes),
+                "content_snapshot": _admin_content_snapshot(episode.topic_hint),
+                "provenance": list(episode.provenance),
+            }
+        )
+
+    @staticmethod
+    def _admin_episode_view(episode: Episode) -> dict[str, Any]:
+        return _admin_json(
+            {
+                "episode_id": episode.episode_id,
+                "scope_id": episode.scope_id,
+                "state": episode.state.value,
+                "root_event_id": episode.root_event_id,
+                "opened_at": episode.opened_at,
+                "last_activity_at": episode.last_activity_at,
+                "soft_closed_at": episode.soft_closed_at,
+                "finalized_at": episode.finalized_at,
+                "participants": episode.participants,
+                "content_snapshot": _admin_content_snapshot(episode.topic_hint),
+                "event_refs": episode.event_refs,
+                "unresolved_refs": list(episode.unresolved_refs),
+                "revision": episode.revision,
+                "provenance": list(episode.provenance),
+            }
+        )
+
+    @staticmethod
+    def _admin_outcome_view(
+        outcome: OutcomeObservation, episode: Episode | None = None
+    ) -> dict[str, Any]:
+        return _admin_json(
+            {
+                "observation_id": outcome.observation_id,
+                "target_episode_id": outcome.target_episode_id,
+                "kind": outcome.kind.value,
+                "observed_at": outcome.observed_at,
+                "source_event_id": outcome.source_event_id,
+                "source_ref_id": outcome.source_ref_id,
+                "actor_entity": outcome.actor_entity,
+                "target_entity": outcome.target_entity,
+                "explicitness": outcome.explicitness.value,
+                "confidence": outcome.confidence,
+                "evidence": list(outcome.evidence),
+                "producer": outcome.producer,
+                "provenance": list(outcome.provenance),
+                "late_feedback": (
+                    P1ObservatoryService._is_late(outcome, episode)
+                    if episode is not None
+                    else None
+                ),
+            }
+        )
 
     @staticmethod
     def _is_late(outcome: OutcomeObservation, episode: Episode) -> bool:

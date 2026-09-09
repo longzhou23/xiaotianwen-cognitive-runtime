@@ -67,6 +67,16 @@ P2b Explicit Publish V1 已运行上述聚焦 pytest；真实消息发送、Prov
 
 本轮构建结果：71 个相关 Python 文件语法检查通过；新增 R04 文件、main.py 和反馈测试文件 Ruff F 检查通过；`npm run build:check` 的 Vue 类型检查及 Vite 生产构建通过，已同步打包页面。构建有大于 600 kB 的现有图表 vendor chunk 提示，不影响构建完成。新增和历史测试均未在本轮运行。
 
+## 2026-09-09 管理员逐条审计记录视图
+
+本地源码已将认知观测台从脱敏汇总详情扩展为管理员可审计的逐条只读记录入口。新增 `GET /astrbot_plugin_iris_memory/cognitive-observatory/admin/identity`、`admin/episodes`、`admin/episodes/<episode_id>` 和 `admin/outcomes`，分别使用 `iris.observatory-admin-identity.v1`、`iris.observatory-admin-episode.v1`、`iris.observatory-admin-outcome.v1` 响应 schema；既有 `GET /manage/identity` 复用同一 Identity 读模型并保留 `iris.identity-registry-admin.v1` schema。所有列表均带 `limit/offset`，详情只读取当前 runtime owner 的 EpisodeStore、ReviewStore、Identity Registry 和已有快照投影。
+
+管理员 Identity 可查看每个实体的真实 `id/type/platform_ids/aliases/self`，以及 claim 的 `claim_id/mention/candidate_entity/evidence/source/status/confidence/created_at`。Episode 可查看 `episode_id/scope_id/state/root_event_id/opened_at/last_activity_at/finalized_at/provenance/event_refs`，内容只来自已持久化的 `topic_hint` 快照，限制 240 字符并返回截断标志；单条详情同时显示关联 Outcome、Review、Snapshot 和事件引用。Outcome 可查看 `observation_id/target_episode_id/kind/observed_at/source_event_id/source_ref_id/explicitness/confidence/evidence/producer/provenance`，前端明确标注其为观察事实而非奖励或质量判断。
+
+管理员面板在基础视图与工程详情之间给出可读提示。工程详情只在认证插件 Web API 内读取，递归屏蔽 secret/token/password/api_key/cookie/authorization/private key 等字段和值，不返回生产配置、KV 原始 payload、文件路径或任意对象 repr；读取损坏或不可用时 fail-closed。此次没有读取原始消息数据库、修改 Identity/Profile/Affect/Persona owner、写入历史或执行自动批准/发布。
+
+虚构数据验证：后端管理员 Web 与管理路由共 `30 passed, 1 warning`；前端 `2 files, 13 passed`；`npm run build:check` 的 Vue 类型检查和 Vite 生产构建通过。真实管理员权限、真实数据浏览和浏览器视觉验收仍未执行，未部署、提交或推送。
+
 
 ## R04 管理闭环补充
 

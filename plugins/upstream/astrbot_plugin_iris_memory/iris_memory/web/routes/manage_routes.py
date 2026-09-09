@@ -22,6 +22,7 @@ from iris_memory.persona_evolution import PersonaEvolutionComponent
 from iris_memory.tasks.scheduler import TaskScheduler
 from iris_memory.cognitive.contracts import CognitiveContractError
 from iris_memory.cognitive.iris_adapter import get_cognitive_runtime
+from iris_memory.web.services.observatory_service import P1ObservatoryService
 
 logger = get_logger("web.manage")
 
@@ -29,35 +30,26 @@ PLUGIN_NAME = "astrbot_plugin_iris_memory"
 
 
 async def list_identity_registry():
-    registry = get_cognitive_runtime().registry
-    if not registry.available:
-        return jsonify({"success": False, "error": "身份库不可用"}), 503
-    return jsonify(
-        {
-            "success": True,
-            "schema": "iris.identity-registry-admin.v1",
-            "entities": [
-                {
-                    "id": entity.id,
-                    "platform_ids": dict(entity.platform_ids),
-                    "aliases": list(entity.aliases),
-                }
-                for entity in registry.entities()
-            ],
-            "claims": [
-                {
-                    "claim_id": registry.claim_id(claim),
-                    "mention": claim.mention,
-                    "candidate_entity": claim.candidate_entity,
-                    "evidence": list(claim.evidence),
-                    "source": claim.source,
-                    "status": claim.status.value,
-                    "created_at": claim.created_at.isoformat(),
-                }
-                for claim in registry.all_claims()
-            ],
-        }
-    )
+    try:
+        registry = get_cognitive_runtime().registry
+        detail = P1ObservatoryService(
+            runtime_state={
+                "identity_available": getattr(registry, "available", False) is True,
+                "identity_registry": registry,
+            }
+        ).admin_identity(
+            limit=request.args.get("limit", 50),
+            offset=request.args.get("offset", 0),
+        )
+        if not detail["available"]:
+            return jsonify({"success": False, "error": "身份库不可用", **detail}), 503
+        # Preserve the established manage API schema while adding the bounded,
+        # recursively redacted administrator read projection.
+        detail["schema"] = "iris.identity-registry-admin.v1"
+        detail["read_only"] = True
+        return jsonify({"success": True, **detail})
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
 
 async def confirm_identity_alias():
