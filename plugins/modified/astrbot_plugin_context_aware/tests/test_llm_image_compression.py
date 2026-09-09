@@ -7,14 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from image_compression import ImageCompressionOptions, compress_local_image
 from PIL import Image
 
-from image_compression import ImageCompressionOptions, compress_local_image
-
 try:
-    from tests.test_gemini_stt_context import FakeContext, load_plugin_module
+    from tests.test_gemini_stt_context import FakeContext, FakeEvent, load_plugin_module
 except ModuleNotFoundError:
-    from test_gemini_stt_context import FakeContext, load_plugin_module
+    from test_gemini_stt_context import FakeContext, FakeEvent, load_plugin_module
 
 
 def _make_noisy_jpeg(path: Path, size: tuple[int, int] = (1800, 1200)) -> bytes:
@@ -202,6 +201,33 @@ class LLMImageCompressionIntegrationTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mod = load_plugin_module()
 
+    async def test_orchestrator_owner_marker_blocks_legacy_context_owner(self):
+        plugin = self.mod.Main(FakeContext(), {"enable": True})
+        event = FakeCompressionEvent(private=True)
+        event.set_extra(self.mod.ExtraKeys.CONVERSATION_RUNTIME_OWNER, True)
+        req = types.SimpleNamespace(image_urls=[], extra_user_content_parts=[])
+
+        await plugin.on_llm_request(event, req)
+        await plugin.on_llm_response(
+            event,
+            types.SimpleNamespace(completion_text="不应写入旧历史"),
+        )
+
+        self.assertFalse(plugin._sessions.has_session(event.unified_msg_origin))
+        await plugin.terminate()
+
+    async def test_orchestrator_owner_marker_blocks_legacy_ingress_owner(self):
+        plugin = self.mod.Main(
+            FakeContext(), {"enable": True, "only_group_chat": False}
+        )
+        event = FakeEvent()
+        event.extras[self.mod.ExtraKeys.CONVERSATION_RUNTIME_OWNER] = True
+
+        await plugin.on_message(event)
+
+        self.assertFalse(plugin._sessions.has_session(event.unified_msg_origin))
+        await plugin.terminate()
+
     async def test_request_images_compress_even_when_context_feature_is_disabled(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "request.jpg"
@@ -210,6 +236,7 @@ class LLMImageCompressionIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 FakeContext(),
                 {
                     "enable": False,
+                    "conversation_context_enabled": False,
                     "only_group_chat": True,
                     "image_cache_dir": str(Path(root) / "cache"),
                     "llm_image_compress": {

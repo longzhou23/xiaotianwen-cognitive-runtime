@@ -157,6 +157,13 @@ class ExtraKeys:
     CMDMASK_APPLIED: Final[str] = "__astrbot_plugin_cmdmask:applied"
     CMDMASK_TARGET: Final[str] = "__astrbot_plugin_cmdmask:target"
 
+    # Set by the canonical conversation runtime when it owns the current
+    # ProviderRequest.  This is a non-content interlock against accidental
+    # dual short-history ownership during migration.
+    CONVERSATION_RUNTIME_OWNER: Final[str] = (
+        "_xiaotianwen_conversation_runtime_owner_v1"
+    )
+
     IMAGE_COMPRESS_MAP: Final[str] = "_context_aware_image_compress_map"
 
     # 场景注入标记，防止重复注入
@@ -1575,6 +1582,13 @@ class Main(star.Star):
         self._context = context  # 保存 context 用于获取 provider
 
         self._enabled = self._cfg_bool("enable", True)
+        # During migration this narrow switch retires only conversational
+        # history/scene ownership while preserving media preprocessing and
+        # caption compatibility.  The legacy plugin remains enabled by
+        # default until the orchestrator canary is explicitly selected.
+        self._conversation_context_enabled = self._cfg_bool(
+            "conversation_context_enabled", True
+        )
         self._group_only = self._cfg_bool("only_group_chat", True)
         self._warn_builtin_ltm = self._cfg_bool("warn_builtin_ltm", True)
         self._show_recent_images = self._cfg_bool("show_recent_images", True)
@@ -3141,6 +3155,12 @@ class Main(star.Star):
             self._image_compress_errors += 1
             logger.warning(f"[ContextAware] 消息图片预处理失败, 已保留原图: {e}")
 
+        if event.get_extra(ExtraKeys.CONVERSATION_RUNTIME_OWNER, False):
+            return
+
+        if not self._conversation_context_enabled:
+            return
+
         if not self._should_process(event):
             return
 
@@ -3219,6 +3239,12 @@ class Main(star.Star):
         except Exception as e:
             self._image_compress_errors += 1
             logger.warning(f"[ContextAware] LLM 请求图片预处理失败, 已保留原图: {e}")
+
+        if event.get_extra(ExtraKeys.CONVERSATION_RUNTIME_OWNER, False):
+            return
+
+        if not self._conversation_context_enabled:
+            return
 
         if not self._should_process(event):
             return
@@ -3400,6 +3426,10 @@ class Main(star.Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
         """记录 Bot 回复"""
+        if event.get_extra(ExtraKeys.CONVERSATION_RUNTIME_OWNER, False):
+            return
+        if not self._conversation_context_enabled:
+            return
         if not self._should_process(event):
             return
 

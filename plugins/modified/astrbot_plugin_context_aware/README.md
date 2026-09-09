@@ -25,6 +25,21 @@
 
 需要 AstrBot `>=4.24.0`。本插件会把场景提示标记为临时内容，避免动态上下文被写入会话历史。
 
+## Conversation Runtime 迁移边界
+
+当上层 `xiaotianwen_orchestrator` 的 `conversation_runtime_enabled` 开启时，
+本插件不再拥有短期会话历史、场景注入或 Bot 回复历史；这些职责由
+`ConversationKey → TurnAssembler → ConversationLedger → ContextBridge` 单一链路负责。
+`conversation_context_enabled=false` 只关闭本插件的会话/场景职责，不等同于
+`enable=false`：以下两项兼容能力仍保留并继续执行：
+
+- 入站图片预处理；
+- LLM 请求图片压缩。
+
+以下能力在该迁移开关关闭时明确退役，暂不由编排器补回：addressee/flow 场景推断、
+延迟最近图片场景注入、语音上下文场景注入、poke 场景处理，以及本插件的消息/回复历史。
+如生产仍依赖这些会话场景能力，应在切换前单独完成等价迁移；本插件不会暗中继续注入第二份会话历史。
+
 ---
 
 # ⚠️ 安装后必须配置

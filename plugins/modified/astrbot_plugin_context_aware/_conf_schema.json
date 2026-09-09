@@ -4,6 +4,12 @@
     "type": "bool",
     "default": true
   },
+  "conversation_context_enabled": {
+    "description": "保留 ContextAware 非上下文兼容能力，但是否继续拥有会话历史/场景注入",
+    "type": "bool",
+    "default": true,
+    "hint": "切换到小天文编排器 ConversationBridge 时设为 false。保留入站图片预处理与 LLM 请求图片压缩；会话历史、场景/对话流、addressee/flow 推断、延迟最近图片场景、语音上下文、poke 场景和 Bot 回复历史随之退役。"
+  },
   "bot_names": {
     "description": "Bot的各种称呼（用于检测被提及，不填则不检测）",
     "type": "list",
