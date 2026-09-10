@@ -53,6 +53,7 @@ _ALLOWED_SOURCE_TYPES = {
     "episode_event_ref",
     "p2r0_archive",
     "p2r1_authority",
+    "astrbot_platform_history",
 }
 _REFUSABLE_ALIAS_SOURCES = {"identity_export", "manual_confirmed_claim"}
 

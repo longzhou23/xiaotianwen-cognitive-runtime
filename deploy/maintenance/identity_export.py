@@ -1,11 +1,12 @@
 """Build a redacted, structure-only historical Identity rebuild export.
 
-The exporter reads JSONL envelopes from explicitly selected historical stores,
-but follows a small allowlist of identity fields.  It never reads message
-content, display names, evidence text, or free-form model output.  Message
-identity fields such as ``message_id``, ``trace_id`` and ``account_id`` in a
-P2r0/P2r1 platform-message object are not user identity fields and cannot
-produce an export record.
+The exporter reads JSONL envelopes and an optional read-only AstrBot metadata
+database from explicitly selected historical stores, but follows a small
+allowlist of identity fields.  It never reads message content, display names,
+evidence text, or free-form model output.  Message identity fields such as
+``message_id``, ``trace_id`` and ``account_id`` in a P2r0/P2r1
+platform-message object cannot produce a user record; a verified account
+binding may only contribute to the separate SELF binding path.
 
 The result is an ``iris.identity-rebuild-source.v1`` document accepted by
 ``identity_rebuild.py``.  A separate private report carries anonymous counts,
@@ -21,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterator
@@ -248,6 +250,66 @@ def _iter_episode_objects(payload: object) -> Iterator[tuple[str, object]]:
     for key in _EXPLICIT_IDENTITY_KEYS:
         if key in payload:
             yield f"payload.{key}", payload[key]
+    if "actor_entity" in payload:
+        yield "payload.actor_entity", payload["actor_entity"]
+
+
+def _iter_p2r0_binding_objects(envelope: object) -> Iterator[tuple[str, object]]:
+    """Yield only the known adapter/bot binding objects from P2r0 wire data."""
+
+    if not isinstance(envelope, dict):
+        return
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
+        return
+
+    def walk_fields(fields: dict[str, Any], prefix: str) -> Iterator[tuple[str, object]]:
+        for key in (
+            "platform_message_identity",
+            "source_platform_message_identity",
+            "reply_target_platform_message_identity",
+        ):
+            if key in fields:
+                yield f"{prefix}.{key}", fields[key]
+        for key in ("host_output_facts", "inbound_reply_facts"):
+            values = fields.get(key)
+            if not isinstance(values, list):
+                continue
+            for index, value in enumerate(values):
+                if isinstance(value, dict) and isinstance(value.get("fields"), dict):
+                    yield from walk_fields(value["fields"], f"{prefix}.{key}[{index}].fields")
+
+    yield from walk_fields(payload["fields"], "payload.fields")
+
+
+def _p2r0_binding(value: object) -> tuple[dict[str, str] | None, str | None]:
+    if not isinstance(value, dict) or not isinstance(value.get("fields"), dict):
+        return None, "P2R0_BINDING_SHAPE_INVALID"
+    fields = value["fields"]
+    platform_value = fields.get("platform_id")
+    account_value = fields.get("account_id")
+    if platform_value is None or account_value is None:
+        return None, "P2R0_BINDING_FIELDS_MISSING"
+    try:
+        platform = _component(platform_value, "platform").casefold()
+        account_id = _component(account_value, "account_id")
+    except ExportError:
+        return None, "P2R0_BINDING_COMPONENT_INVALID"
+    return {
+        "role": "self",
+        "platform": platform,
+        "account_id": account_id,
+        "uid": account_id,
+        "entity_id": SELF_ENTITY,
+    }, None
+
+
+def _row_hash(row: dict[str, object]) -> str:
+    return _sha256_bytes(
+        json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    )
 
 
 def _iter_explicit_objects(envelope: dict[str, Any]) -> Iterator[tuple[str, object]]:
@@ -293,18 +355,23 @@ def _observation(
     source_type: str,
     record_hash: str,
     field_path: str,
+    record_key: str | None = None,
+    inherited_evidence_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         **identity,
         "source_type": source_type,
         "record_hash": record_hash,
         "field_path": field_path or "record",
+        "record_key": record_key or record_hash,
+        "inherited_evidence_refs": sorted(set(inherited_evidence_refs or [])),
     }
 
 
 def _merge_provenance(observations: list[dict[str, Any]], *, basis: str) -> dict[str, Any]:
     first = observations[0]
     refs = [f"record:{item['record_hash']}" for item in observations]
+    refs.extend(ref for item in observations for ref in item.get("inherited_evidence_refs", []))
     return _provenance(
         source_type=first["source_type"],
         record_hash=first["record_hash"],
@@ -374,6 +441,7 @@ def export_history(
     episode_path: Path | None = None,
     p2r0_path: Path | None = None,
     p2r1_path: Path | None = None,
+    astrbot_db_path: Path | None = None,
     identity_registry_path: Path | None = None,
     authorization_ref: str,
 ) -> ExportResult:
@@ -386,7 +454,11 @@ def export_history(
         "p2r0": p2r0_path,
         "p2r1": p2r1_path,
     }
-    if not any(path is not None for path in selected.values()) and identity_registry_path is None:
+    if (
+        not any(path is not None for path in selected.values())
+        and astrbot_db_path is None
+        and identity_registry_path is None
+    ):
         raise ExportError("at least one explicitly authorized input is required")
     counts: Counter[str] = Counter()
     skipped: Counter[str] = Counter()
@@ -396,6 +468,8 @@ def export_history(
     input_meta: list[dict[str, Any]] = []
     user_observations: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     self_observations: list[dict[str, Any]] = []
+    adapter_accounts: defaultdict[str, set[str]] = defaultdict(set)
+    adapter_account_refs: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
 
     for name, path in selected.items():
         if path is None:
@@ -423,6 +497,29 @@ def export_history(
                     {"record_hash": record_hash, "field_path": "record"},
                 )
                 continue
+            if source_type == "p2r0_archive":
+                for binding_path, binding_value in _iter_p2r0_binding_objects(envelope):
+                    binding, binding_reason = _p2r0_binding(binding_value)
+                    if binding_reason is not None or binding is None:
+                        skipped[binding_reason or "P2R0_BINDING_NOT_EXTRACTED"] += 1
+                        _add_sample(
+                            skip_samples,
+                            binding_reason or "P2R0_BINDING_NOT_EXTRACTED",
+                            {"record_hash": record_hash, "field_path": binding_path},
+                        )
+                        continue
+                    adapter_accounts[binding["platform"]].add(binding["account_id"])
+                    adapter_account_refs[(binding["platform"], binding["account_id"])].append(record_hash)
+                    self_observations.append(
+                        _observation(
+                            identity=binding,
+                            source_type=source_type,
+                            record_hash=record_hash,
+                            field_path=f"{binding_path}.fields.account_id",
+                            record_key=f"{record_hash}:{lines}",
+                        )
+                    )
+                    counts["explicit_self_binding_observations"] += 1
             candidates = list(
                 _scan_line(source_type=source_type, envelope=envelope, record_hash=record_hash)
             )
@@ -450,6 +547,7 @@ def export_history(
                     source_type=source_type,
                     record_hash=record_hash,
                     field_path=field_path,
+                    record_key=f"{record_hash}:{lines}",
                 )
                 if identity["role"] == "self":
                     self_observations.append(observation)
@@ -464,6 +562,109 @@ def export_history(
                 "sha256": file_hash,
                 "records": lines,
                 "malformed": malformed,
+            }
+        )
+
+    if astrbot_db_path is not None:
+        try:
+            db_raw = astrbot_db_path.read_bytes()
+            connection = sqlite3.connect(f"file:{astrbot_db_path}?mode=ro", uri=True)
+            rows = connection.execute(
+                "SELECT id, platform_id, user_id, sender_id "
+                "FROM platform_message_history ORDER BY id"
+            )
+            db_records = 0
+            for row_id, platform_value, scope_value, sender_value in rows:
+                db_records += 1
+                counts["records_scanned"] += 1
+                row = {
+                    "table": "platform_message_history",
+                    "id": row_id,
+                    "platform_id": platform_value,
+                    "user_id": scope_value,
+                    "sender_id": sender_value,
+                }
+                record_hash = _row_hash(row)
+                try:
+                    platform = _component(platform_value, "platform").casefold()
+                except ExportError:
+                    skipped["MISSING_PLATFORM_ID"] += 1
+                    _add_sample(
+                        skip_samples,
+                        "MISSING_PLATFORM_ID",
+                        {"record_hash": record_hash, "field_path": "platform_message_history.platform_id"},
+                    )
+                    continue
+                try:
+                    sender_id = _component(sender_value, "sender_id")
+                except ExportError:
+                    skipped["MISSING_SENDER_UID"] += 1
+                    _add_sample(
+                        skip_samples,
+                        "MISSING_SENDER_UID",
+                        {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
+                    )
+                    continue
+                accounts = adapter_accounts.get(platform, set())
+                if not accounts:
+                    skipped["MISSING_ACCOUNT_CONTEXT"] += 1
+                    _add_sample(
+                        skip_samples,
+                        "MISSING_ACCOUNT_CONTEXT",
+                        {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
+                    )
+                    continue
+                if len(accounts) > 1:
+                    conflict_counts["ACCOUNT_BINDING_CONFLICT"] += 1
+                    _add_sample(
+                        conflict_samples,
+                        "ACCOUNT_BINDING_CONFLICT",
+                        {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
+                    )
+                    continue
+                account_id = next(iter(accounts))
+                if sender_id == account_id:
+                    skipped["SELF_ACCOUNT_ROW"] += 1
+                    _add_sample(
+                        skip_samples,
+                        "SELF_ACCOUNT_ROW",
+                        {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
+                    )
+                    continue
+                identity = {
+                    "role": "user",
+                    "platform": platform,
+                    "account_id": account_id,
+                    "uid": sender_id,
+                    "entity_id": f"person:{platform}:{sender_id}",
+                }
+                user_observations[(platform, sender_id)].append(
+                    _observation(
+                        identity=identity,
+                        source_type="astrbot_platform_history",
+                        record_hash=record_hash,
+                        field_path="platform_message_history.sender_id",
+                        record_key=record_hash,
+                        inherited_evidence_refs=[
+                            f"record:{ref}"
+                            for ref in adapter_account_refs[(platform, account_id)]
+                        ],
+                    )
+                )
+                counts["explicit_identity_observations"] += 1
+            connection.close()
+        except (OSError, sqlite3.Error) as exc:
+            raise ExportError("AstrBot metadata database could not be read read-only") from exc
+        input_meta.append(
+            {
+                "source_type": "astrbot_platform_history",
+                "path_sha256": _path_hash(astrbot_db_path),
+                "bytes": len(db_raw),
+                "sha256": _sha256_bytes(db_raw),
+                "records": db_records,
+                "malformed": 0,
+                "selected_columns": ["platform_id", "user_id", "sender_id"],
+                "content_column_read": False,
             }
         )
 
@@ -516,7 +717,7 @@ def export_history(
                     reason,
                     {"record_hash": item["record_hash"], "field_path": item["field_path"]},
                 )
-        elif len(self_observations) < 2:
+        elif len({item["record_key"] for item in self_observations}) < 2:
             reason = "SELF_BINDING_INSUFFICIENT_OBSERVATIONS"
             skipped[reason] += 1
             item = self_observations[0]
@@ -621,6 +822,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episode", "--episodes", dest="episode")
     parser.add_argument("--p2r0")
     parser.add_argument("--p2r1")
+    parser.add_argument("--astrbot-db", help="read-only AstrBot data_v4.db metadata source")
     parser.add_argument("--identity-registry")
     parser.add_argument("--output", required=True)
     parser.add_argument("--report")
@@ -636,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
             episode_path=Path(args.episode) if args.episode else None,
             p2r0_path=Path(args.p2r0) if args.p2r0 else None,
             p2r1_path=Path(args.p2r1) if args.p2r1 else None,
+            astrbot_db_path=Path(args.astrbot_db) if args.astrbot_db else None,
             identity_registry_path=Path(args.identity_registry) if args.identity_registry else None,
             authorization_ref=args.authorization_ref,
         )
