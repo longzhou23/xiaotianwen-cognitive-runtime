@@ -20,7 +20,7 @@ Episode/Event、AstrBot 会话元数据、P2r0 archive 和语义 authority 都�
 
 ## 历史导出器
 
-导出器只访问固定的 JSON/JSONL 字段路径，不访问 `content`、昵称、evidence 正文或模型输出。它也可以只读查询 AstrBot `data_v4.db` 的 `platform_message_history(platform_id, user_id, sender_id)` 三个列；其中 `sender_id` 才是明确的 sender UID，`user_id` 只作为父 scope 保留在行 hash 中，绝不当作用户 UID，`content` 列不会被 SELECT。P2r0 的已验证 adapter message identity 只用于继承同平台唯一的 bot `account_id`，并形成跨记录一致的 SELF binding；多个 account 值会阻断导出。导出器可接收 Episode/Event、P2r0、P2r1、AstrBot metadata 和当前 Identity envelope；当前 envelope 中只有 `CONFIRMED` claim 才能作为 alias 候选，`POSSIBLE` 等 claim 会被计入 skipped。所有输出都是私有维护文件，stdout 只输出状态、路径和匿名计数：
+导出器只访问固定的 JSON/JSONL 字段路径，不访问 `content`、昵称、evidence 正文或模型输出。它也可以只读查询 AstrBot `data_v4.db` 的 `platform_message_history(platform_id, user_id, sender_id)` 三个列；其中 `sender_id` 才是明确的 sender UID，`user_id` 只作为父 scope 保留在行 hash 中，绝不当作用户 UID，`content` 列不会被 SELECT。P2r0 的已验证 adapter message identity 只用于继承同平台唯一的 bot `account_id`，并形成跨记录一致的 SELF binding；多个 account 值会阻断导出。冲突校验使用全部 binding 记录，但每个导出的 sender 只保留一个确定性的 account witness hash，避免大历史按行复制全部 binding provenance。导出器可接收 Episode/Event、P2r0、P2r1、AstrBot metadata 和当前 Identity envelope；当前 envelope 中只有 `CONFIRMED` claim 才能作为 alias 候选，`POSSIBLE` 等 claim 会被计入 skipped。所有输出都是私有维护文件，stdout 只输出状态、路径和匿名计数：
 
 ```bash
 python3 deploy/maintenance/identity_export.py \

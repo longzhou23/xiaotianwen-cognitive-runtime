@@ -262,3 +262,33 @@ def test_astrbot_account_context_conflict_blocks_history_records(tmp_path: Path)
     assert result.report["conflict_categories"]["SELF_BINDING_CONFLICT"] == 2
     assert result.report["conflict_categories"]["ACCOUNT_BINDING_CONFLICT"] == 1
     assert not [record for record in result.document["records"] if record["kind"] == "entity"]
+
+
+def test_account_context_provenance_uses_one_witness_for_many_bindings(tmp_path: Path):
+    p2r0 = tmp_path / "facts.jsonl"
+    bindings = []
+    for index in range(32):
+        item = _p2r0_account()
+        item["sequence"] = index
+        bindings.append(item)
+    _jsonl(p2r0, bindings)
+    db_path = tmp_path / "data_v4.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "CREATE TABLE platform_message_history "
+        "(id INTEGER PRIMARY KEY, platform_id TEXT, user_id TEXT, sender_id TEXT, content TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO platform_message_history(id, platform_id, user_id, sender_id, content) "
+        "VALUES (1, 'qq', 'scope', '1001', 'unused')"
+    )
+    connection.commit()
+    connection.close()
+
+    result = export_history(
+        p2r0_path=p2r0,
+        astrbot_db_path=db_path,
+        authorization_ref="fixture-auth",
+    )
+    entity = next(record for record in result.document["records"] if record["kind"] == "entity")
+    assert len(entity["provenance"]["evidence_refs"]) == 2

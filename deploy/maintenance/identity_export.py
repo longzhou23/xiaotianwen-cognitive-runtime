@@ -469,7 +469,12 @@ def export_history(
     user_observations: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     self_observations: list[dict[str, Any]] = []
     adapter_accounts: defaultdict[str, set[str]] = defaultdict(set)
-    adapter_account_refs: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+    # Keep one deterministic witness per account.  Every matching DB row used
+    # to receive every P2r0 record hash here, which made a large production
+    # history quadratic in memory and provenance assembly time.  The full
+    # binding set is still used for conflict detection; one witness is enough
+    # for each accepted row's inherited account context.
+    adapter_account_refs: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
 
     for name, path in selected.items():
         if path is None:
@@ -509,7 +514,7 @@ def export_history(
                         )
                         continue
                     adapter_accounts[binding["platform"]].add(binding["account_id"])
-                    adapter_account_refs[(binding["platform"], binding["account_id"])].append(record_hash)
+                    adapter_account_refs[(binding["platform"], binding["account_id"])].add(record_hash)
                     self_observations.append(
                         _observation(
                             identity=binding,
@@ -646,8 +651,7 @@ def export_history(
                         field_path="platform_message_history.sender_id",
                         record_key=record_hash,
                         inherited_evidence_refs=[
-                            f"record:{ref}"
-                            for ref in adapter_account_refs[(platform, account_id)]
+                            f"record:{min(adapter_account_refs[(platform, account_id)])}"
                         ],
                     )
                 )
