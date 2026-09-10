@@ -785,3 +785,17 @@ G4：Observatory。
 未验证：真实浏览器逐项点击/视觉验收、真实管理员权限链、真实生产 Identity/ Episode/Outcome 数据和线上消息正文可见性均未执行；未部署、提交或推送。前端构建保留既有大图 vendor chunk 提示。
 
 下一张卡：真实运行态只读浏览验收；继续保持历史写入、自动批准和自动发布关闭。
+
+## 2026-09-10 管理员观测台人话默认视图
+
+状态：本地完成，生产部署待完成
+
+具体缺口：管理员身份、互动和结果详情虽然已提供契约字段，但默认仍以工程 ID、枚举和原始表格为主，非技术维护者无法一眼判断发生了什么。
+
+实际改动：管理员 Identity/Episode/Outcome 读模型增加确定性的 `human`/`timeline`/`impact` 投影。Identity 优先使用安全 alias，生成“这是小天文自己/这是一个用户身份”、平台中文标签、别名状态、声明依据和来源说明；Episode 用中文标题、状态、轮次、实际回复、发送和结果数量，按已持久化 `event_refs` 与 Outcome 映射用户消息、认知判断、生成回复、成功发送、明确纠正或确认、互动封存，并在没有 `topic_hint` 正文时显示“系统只保存了结构记录，没有可读正文”；Outcome 覆盖现有全部 `OutcomeKind`/`OutcomeExplicitness`，按闭合规则说明事实观察、Review、晚到和长期影响，不推断奖励；Review 只读取现有 `result_code`/count/promotion。
+
+前端管理员弹窗默认进入“易懂视图（默认）”，Identity/Episode/Outcome 的工程字段、ID、枚举和原始 JSON 通过“工程详情”切换查看；空、不可用、未知枚举和缺字段均有人话说明并保持 fail-closed。后端仍只读、不调用 Provider/LLM、不从原始消息库补读、不持久化、不改变 Identity/Persona/Affect/Relationship owner；正文继续最多 240 字符并沿用递归 secret redaction。构建后移除不再被 `iris.js` 引用的旧观测台 chunk。
+
+验证：管理员后端 `tests/web/test_cognitive_observatory.py`：37 passed, 1 warning；相关 Web 回归：99 passed, 2 个既有 `persona_evolution` rollback/adopt 状态断言失败；`ruff check --select F`、`py_compile`、前端 `npm run test:run`（2 files, 13 passed）、`npm run build:check`（vue-tsc + Vite）和 `git diff --check` 通过。尚待完成本卡要求的 Azure `azure-xtw-01` 备份、推送、部署、重启与线上健康/未认证接口检查。
+
+未验证：真实管理员浏览器逐项视觉验收、生产真实 Identity/Episode/Outcome 数据和管理员权限链；相关 Web 回归中的两个 Persona Evolution 失败与本卡无关，需另行修复。

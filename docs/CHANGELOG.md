@@ -2,6 +2,14 @@
 
 本文件记录 AstrBot 工作区级别的重要变更。
 
+## [Unreleased] - 2026-09-10
+
+### Cognitive Observatory 管理员易懂视图
+
+- Identity、Episode 和 Outcome 管理读模型增加确定性的中文摘要、时间线、依据、来源、Review 说明和闭合影响规则；没有持久化正文时明确提示只保存了结构记录。
+- 管理员详情默认显示“易懂视图（默认）”，工程 ID、枚举、事件引用和原始 JSON 收入“工程详情”切换；保留分页、240 字符正文上限、递归敏感信息屏蔽和全接口只读边界。
+- 未知枚举、缺字段、空数据和不可用存储均保持 fail-closed；投影不调用 Provider/LLM、不从原始消息库补读、不写入认知记录或改变 Persona、Affect、Relationship owner。
+
 ## [P1 Foundation] - 2026-09-02
 
 ### XiaoTianWen Cognitive Runtime checkpoint

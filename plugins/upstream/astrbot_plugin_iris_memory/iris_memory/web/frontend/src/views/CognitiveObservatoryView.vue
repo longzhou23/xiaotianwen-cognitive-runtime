@@ -87,11 +87,62 @@
             <v-alert v-if="!adaptiveDetail.available" :type="adaptiveDetail.status === 'CORRUPTED' ? 'error' : 'warning'" variant="tonal" density="compact" class="mb-3">{{ detailReason(adaptiveDetail.reason) }}</v-alert>
 
             <template v-if="adminRecordKey">
-              <v-alert color="info" variant="tonal" density="compact" class="mb-3">工程详情：仅管理员可见。这里读取已持久化的审计记录，接口为只读；基础视图仍只显示汇总状态。</v-alert>
+              <div class="d-flex align-center flex-wrap ga-3 mb-3">
+                <div><div class="section-label mb-0">管理员记录</div><div class="text-caption text-medium-emphasis">默认用中文解释发生了什么；需要核对原始字段时再打开工程详情。</div></div>
+                <v-spacer />
+                <v-btn-toggle v-model="adminViewMode" density="compact" mandatory variant="tonal" aria-label="管理员记录视图">
+                  <v-btn value="simple">易懂视图（默认）</v-btn><v-btn value="engineering">工程详情</v-btn>
+                </v-btn-toggle>
+              </div>
               <v-progress-linear v-if="recordLoading" indeterminate color="primary" class="mb-3" />
               <v-alert v-if="recordError" type="error" variant="tonal" density="compact" class="mb-3">{{ recordError }}</v-alert>
 
-              <template v-if="!recordLoading && !recordError && selectedAdaptiveKey === 'identity'">
+              <template v-if="!recordLoading && !recordError && adminViewMode === 'simple'">
+                <template v-if="selectedAdaptiveKey === 'identity'">
+                  <v-alert color="info" variant="tonal" density="compact" class="mb-3">{{ recordDetail?.human?.summary || '当前没有可显示的身份记录。' }}</v-alert>
+                  <v-card v-for="entity in recordDetail?.human?.entities || []" :key="entity.name + entity.summary" variant="outlined" class="mb-3 pa-4">
+                    <div class="d-flex align-center ga-2"><v-icon icon="mdi-account-circle-outline" color="primary" /><div class="text-h6">{{ entity.name }}</div><v-chip size="small" color="info" variant="tonal">{{ entity.kind_label }}</v-chip></div>
+                    <div class="text-body-2 mt-2">{{ entity.summary }}</div>
+                    <v-row dense class="mt-2"><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.valid ?? 0 }}</div><div class="text-caption">有效声明</div></v-col><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.conflict ?? 0 }}</div><div class="text-caption">冲突声明</div></v-col><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.revoked ?? 0 }}</div><div class="text-caption">撤销声明</div></v-col></v-row>
+                    <div class="section-label mt-3">平台账号</div>
+                    <div v-if="entity.platforms?.length" class="d-flex flex-wrap ga-2"><v-chip v-for="platform in entity.platforms" :key="platform.platform + platform.value" size="small" variant="outlined" color="primary">{{ platform.platform }}：{{ platform.value }} · {{ platform.status }}</v-chip></div>
+                    <div v-else class="text-body-2 text-medium-emphasis">没有已绑定的平台账号。</div>
+                    <div class="section-label mt-3">别名</div>
+                    <div v-if="entity.aliases?.length" class="d-flex flex-wrap ga-2"><v-chip v-for="alias in entity.aliases" :key="alias.name" size="small" :color="alias.status === '冲突' ? 'error' : alias.status === '已确认' ? 'success' : 'grey'">{{ alias.name }} · {{ alias.status }} · {{ alias.source_explanation }}</v-chip></div>
+                    <div v-else class="text-body-2 text-medium-emphasis">没有已保存的别名；系统使用“{{ entity.name }}”作为显示名称。</div>
+                  </v-card>
+                  <v-card v-for="claim in recordDetail?.human?.claims || []" :key="claim.name + claim.target_name + claim.summary" variant="tonal" class="mb-2 pa-3"><div class="text-body-2">{{ claim.summary }}</div><div class="text-caption text-medium-emphasis mt-1">{{ claim.status }} · {{ claim.evidence_count }} 条依据 · {{ claim.source_explanation }}</div></v-card>
+                  <div v-if="!recordDetail?.human?.entities?.length && !recordDetail?.human?.claims?.length" class="text-body-2 text-medium-emphasis py-4">{{ recordDetail?.human?.empty_message || '当前没有可显示的身份记录。' }}</div>
+                </template>
+
+                <template v-else-if="selectedAdaptiveKey === 'episodes'">
+                  <v-alert color="info" variant="tonal" density="compact" class="mb-3">{{ recordDetail?.human?.summary || '当前没有可显示的互动记录。' }}</v-alert>
+                  <v-card v-for="(episode, index) in recordDetail?.episodes || []" :key="episode.episode_id" variant="outlined" class="mb-3 pa-3">
+                    <div class="d-flex align-center ga-2"><v-icon icon="mdi-message-text-clock-outline" color="primary" /><strong>{{ recordHumanAt('episodes', index)?.title || '未命名互动' }}</strong><v-chip size="small" :color="stateColor(episode.state)">{{ recordHumanAt('episodes', index)?.state_label || '未知状态，查看工程详情' }}</v-chip><v-spacer /><v-btn size="small" variant="tonal" @click="loadAdminEpisode(episode.episode_id)">查看互动</v-btn></div>
+                    <div class="text-body-2 mt-2">{{ recordHumanAt('episodes', index)?.summary || '当前没有可读摘要。' }}</div>
+                    <div class="text-caption text-medium-emphasis mt-2">{{ formatObservedAt(recordHumanAt('episodes', index)?.opened_at) }} 至 {{ formatObservedAt(recordHumanAt('episodes', index)?.ended_at) }} · {{ recordHumanAt('episodes', index)?.interaction_turns ?? 0 }} 轮互动 · 实际回复 {{ recordHumanAt('episodes', index)?.actual_replies ?? 0 }} 次 · 结果 {{ recordHumanAt('episodes', index)?.result_count ?? 0 }} 个</div>
+                  </v-card>
+                  <div v-if="!recordDetail?.episodes?.length" class="text-body-2 text-medium-emphasis py-4">{{ recordDetail?.human?.empty_message || '当前没有可显示的互动记录。' }}</div>
+                  <v-card v-if="selectedRecordDetail?.human" variant="tonal" class="mt-4 pa-4">
+                    <div class="d-flex align-center ga-2"><div class="text-h6">{{ selectedRecordDetail.human.title }}</div><v-chip size="small" color="info">{{ selectedRecordDetail.human.state_label }}</v-chip></div>
+                    <div class="text-body-2 mt-2">{{ selectedRecordDetail.human.summary }}</div>
+                    <v-row dense class="mt-2"><v-col cols="6" sm="3"><div class="human-metric">{{ selectedRecordDetail.human.interaction_turns }}</div><div class="text-caption">互动轮次</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ selectedRecordDetail.human.actual_replies }}</div><div class="text-caption">实际回复</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ selectedRecordDetail.human.successful_sends }}</div><div class="text-caption">成功发送</div></v-col><v-col cols="6" sm="3"><div class="human-metric">{{ selectedRecordDetail.human.result_count }}</div><div class="text-caption">结果数量</div></v-col></v-row>
+                    <div class="section-label mt-3">系统保存了什么</div><div class="text-body-2">{{ selectedRecordDetail.human.content?.text || selectedRecordDetail.human.content?.explanation || '系统只保存了结构记录，没有可读正文。' }}<v-chip v-if="selectedRecordDetail.human.content?.truncated" size="x-small" color="amber-darken-2" class="ml-2">已截断</v-chip></div>
+                    <div class="section-label mt-3">发生了什么</div><v-timeline v-if="selectedRecordDetail.human.timeline?.length" density="compact" side="end" truncate-line="both"><v-timeline-item v-for="(event, index) in selectedRecordDetail.human.timeline" :key="event.label + event.at + index" size="x-small" :dot-color="event.late_feedback ? 'amber-darken-2' : 'primary'"><div class="text-caption text-medium-emphasis">{{ formatObservedAt(event.at) }}</div><div class="text-body-2 font-weight-medium">{{ event.label }}</div><div class="text-caption text-medium-emphasis">{{ event.description }}</div><v-chip v-if="event.late_feedback" size="x-small" color="amber-darken-2">晚到的结果</v-chip></v-timeline-item></v-timeline><div v-else class="text-body-2 text-medium-emphasis">{{ selectedRecordDetail.human.timeline_empty_message || '这段互动没有可显示的时间线步骤。' }}</div>
+                    <div class="section-label mt-3">结果和影响</div><v-card v-for="outcome in selectedRecordDetail.outcomes || []" :key="outcome.observation_id" variant="outlined" class="mb-2 pa-3"><div class="text-body-2">{{ outcome.human?.what_happened || '未知类型，查看工程详情' }}</div><div class="text-caption text-medium-emphasis mt-1">{{ outcome.human?.basis || '依据不可用' }} · {{ outcome.human?.direct_expression || '未知是否直接表达，查看工程详情' }} · {{ outcome.human?.late_feedback || '晚到状态未知' }}</div><div class="text-caption mt-1">{{ outcome.human?.current_impact || '影响未知，查看工程详情。' }}</div></v-card><div v-if="!selectedRecordDetail.outcomes?.length" class="text-body-2 text-medium-emphasis">这段互动没有记录结果。</div>
+                    <div class="section-label mt-3">复盘</div><div class="text-body-2">{{ selectedRecordDetail.human.review?.completion || '当前没有可用的复盘记录。' }}</div><div class="text-body-2 mt-1">{{ selectedRecordDetail.human.review?.what_was_found || '没有可报告的复盘发现。' }}</div><div class="text-caption text-medium-emphasis mt-1">{{ selectedRecordDetail.human.review?.evidence_explanation || 'Evidence 状态不可用。' }}</div><div class="text-caption mt-1">{{ selectedRecordDetail.human.review?.long_term_impact || '不会自动修改长期记忆或行为。' }}</div>
+                  </v-card>
+                </template>
+
+                <template v-else-if="selectedAdaptiveKey === 'outcomes'">
+                  <v-alert color="info" variant="tonal" density="compact" class="mb-3">{{ recordDetail?.human?.summary || '当前没有可显示的结果观察。' }} 结果是事实观察，不代表奖励或质量评价。</v-alert>
+                  <v-card v-for="(outcome, index) in recordDetail?.outcomes || []" :key="outcome.observation_id" variant="outlined" class="mb-3 pa-3 record-row" @click="selectedOutcome = outcome"><div class="d-flex align-center ga-2"><v-icon icon="mdi-flag-checkered" color="primary" /><strong>{{ recordHumanAt('outcomes', index)?.what_happened || '未知类型，查看工程详情' }}</strong><v-spacer /><v-chip size="small" :color="outcome.late_feedback ? 'amber-darken-2' : 'grey'">{{ outcome.human?.late_feedback || '晚到状态未知' }}</v-chip></div><div class="text-body-2 mt-2">针对：{{ recordHumanAt('outcomes', index)?.target_interaction || '未知互动，查看工程详情' }}</div><div class="text-caption text-medium-emphasis mt-1">{{ recordHumanAt('outcomes', index)?.basis || '依据不可用' }} · {{ recordHumanAt('outcomes', index)?.direct_expression || '未知是否直接表达，查看工程详情' }}</div><div class="text-caption mt-1">{{ recordHumanAt('outcomes', index)?.current_impact || '影响未知，查看工程详情。' }}</div></v-card>
+                  <div v-if="!recordDetail?.outcomes?.length" class="text-body-2 text-medium-emphasis py-4">{{ recordDetail?.human?.empty_message || '当前没有可显示的结果观察。' }}</div>
+                  <v-card v-if="selectedOutcome?.human" variant="tonal" class="mt-4 pa-3"><div class="section-label">结果观察详情</div><div class="text-body-2">{{ selectedOutcome.human.what_happened }}</div><div class="text-body-2 mt-2">针对：{{ selectedOutcome.human.target_interaction }}</div><div class="text-body-2 mt-1">依据：{{ selectedOutcome.human.basis }}</div><div class="text-body-2 mt-1">是否直接表达：{{ selectedOutcome.human.direct_expression }}</div><div class="text-body-2 mt-1">是否晚到：{{ selectedOutcome.human.late_feedback }}</div><div class="text-body-2 mt-1">当前影响：{{ selectedOutcome.human.current_impact }}</div></v-card>
+                </template>
+              </template>
+
+              <template v-else-if="!recordLoading && !recordError && selectedAdaptiveKey === 'identity'">
                 <v-row dense>
                   <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.entity_count ?? '—' }}</div><div class="text-caption">实体</div></v-col>
                   <v-col cols="6" sm="3"><div class="detail-metric">{{ recordDetail?.claim_count ?? '—' }}</div><div class="text-caption">身份声明</div></v-col>
@@ -233,14 +284,14 @@
     <v-row>
       <v-col cols="12" lg="4">
         <v-card variant="flat" class="panel fill-height">
-          <v-card-title class="d-flex align-center text-subtitle-1"><v-icon icon="mdi-view-list-outline" class="mr-2" />Episodes<v-spacer /><v-btn icon="mdi-refresh" variant="text" size="small" @click="loadAll" /></v-card-title>
+          <v-card-title class="d-flex align-center text-subtitle-1"><v-icon icon="mdi-view-list-outline" class="mr-2" />互动记录<v-spacer /><v-btn icon="mdi-refresh" variant="text" size="small" @click="loadAll" /></v-card-title>
           <v-card-text class="pt-0">
-            <v-text-field v-model="query" label="搜索 Episode / Root / Ref" density="compact" hide-details clearable prepend-inner-icon="mdi-magnify" class="mb-2" @keyup.enter="loadEpisodes" />
-            <v-btn-toggle v-model="state" density="compact" variant="tonal" class="state-toggle mb-3" @update:model-value="loadEpisodes"><v-btn value="ALL">ALL</v-btn><v-btn value="OPEN">OPEN</v-btn><v-btn value="SOFT_CLOSED">SOFT</v-btn><v-btn value="FINALIZED">FINALIZED</v-btn><v-btn value="INTERRUPTED">INTERRUPTED</v-btn></v-btn-toggle>
+            <v-text-field v-model="query" label="搜索互动记录" density="compact" hide-details clearable prepend-inner-icon="mdi-magnify" class="mb-2" @keyup.enter="loadEpisodes" />
+            <v-btn-toggle v-model="state" density="compact" variant="tonal" class="state-toggle mb-3" @update:model-value="loadEpisodes"><v-btn value="ALL">全部</v-btn><v-btn value="OPEN">进行中</v-btn><v-btn value="SOFT_CLOSED">暂时结束</v-btn><v-btn value="FINALIZED">已封存</v-btn><v-btn value="INTERRUPTED">已中断</v-btn></v-btn-toggle>
             <v-list v-if="episodes.length" density="compact" class="episode-list">
               <v-list-item v-for="episode in episodes" :key="episode.episode_id" :active="selectedId === episode.episode_id" @click="selectEpisode(episode.episode_id)">
                 <template #prepend><v-icon :color="stateColor(episode.state)" icon="mdi-circle" size="10" /></template>
-                <v-list-item-title class="text-body-2 text-truncate">{{ episode.episode_id }}</v-list-item-title>
+                <v-list-item-title class="text-body-2 text-truncate">{{ viewMode === 'simple' ? (episode.human?.title || '未命名互动') : episode.episode_id }}</v-list-item-title>
                 <v-list-item-subtitle v-if="viewMode === 'simple'">{{ episode.human?.lifecycle_label || episode.state }} · {{ episode.human?.interaction_turns ?? 0 }} 轮互动 · {{ episode.human?.host_outputs ?? 0 }} 次回复 · {{ episode.human?.outcomes ?? episode.outcome_count }} 个结果</v-list-item-subtitle>
                 <v-list-item-subtitle v-else>{{ episode.state }} · {{ episode.event_count }} events · {{ episode.outcome_count }} outcomes</v-list-item-subtitle>
               </v-list-item>
@@ -310,7 +361,7 @@ import { computed, onMounted, ref } from 'vue'
 import { getObservatoryAdminEpisode, getObservatoryAdminEpisodes, getObservatoryAdminIdentity, getObservatoryAdminOutcomes, getObservatoryDemoCase, getObservatoryDemoCases, getObservatoryEpisode, getObservatoryEpisodes, getObservatoryRuntimeDetail, getObservatorySummary, previewObservatoryReview } from '@/api/observatory'
 
 const summary = ref<any>(null); const runtimeDetail = ref<any>(null); const episodes = ref<any[]>([]); const demos = ref<any[]>([]); const detail = ref<any>(null); const previewResult = ref<any>(null)
-const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple'); const selectedAdaptiveKey = ref(''); const adaptiveDetailOpen = ref(false)
+const selectedId = ref(''); const query = ref(''); const state = ref('ALL'); const loading = ref(false); const error = ref(''); const isDemo = ref(false); const viewMode = ref<'simple' | 'engineering'>('simple'); const adminViewMode = ref<'simple' | 'engineering'>('simple'); const selectedAdaptiveKey = ref(''); const adaptiveDetailOpen = ref(false)
 const recordDetail = ref<any>(null); const selectedRecordDetail = ref<any>(null); const selectedOutcome = ref<any>(null); const recordLoading = ref(false); const recordError = ref(''); const adminPage = ref(0); const adminPageSize = 20
 const phaseTitle = computed(() => summary.value?.phase || 'Cognitive Observatory')
 const p2bShadow = computed(() => summary.value?.p2b_shadow || null)
@@ -379,6 +430,7 @@ const formatUnix = (value?: number) => value ? new Date(value * 1000).toLocaleSt
 const formatObservedAt = (value?: string | number) => typeof value === 'number' ? formatUnix(value) : formatTime(value)
 const p2bFlagLabel = (value?: boolean) => value === false ? '关闭' : value === true ? '开启' : '未提供'
 const pretty = (value: unknown) => JSON.stringify(value, null, 2)
+const recordHumanAt = (kind: 'episodes' | 'outcomes', index: number) => recordDetail.value?.human?.[kind]?.[index] || null
 const detailStatusLabel = (value?: string) => ({ AVAILABLE: '可用', SUMMARY_ONLY: '仅有摘要', EMPTY: '为空', EXPIRED: '已过期', UNAVAILABLE: '不可用', CORRUPTED: '数据损坏' } as Record<string, string>)[value || ''] || value || '不可用'
 const detailStatusColor = (value?: string) => value === 'AVAILABLE' ? 'success' : value === 'SUMMARY_ONLY' ? 'info' : value === 'CORRUPTED' ? 'error' : value === 'EXPIRED' ? 'amber-darken-2' : 'grey'
 const detailReason = (value?: string) => ({
@@ -398,6 +450,7 @@ const formatStatusCount = (value?: Record<string, number>) => {
 function openAdaptiveDetail(key: string) {
   selectedAdaptiveKey.value = key
   adaptiveDetailOpen.value = true
+  adminViewMode.value = 'simple'
   recordError.value = ''
   recordDetail.value = null
   selectedRecordDetail.value = null

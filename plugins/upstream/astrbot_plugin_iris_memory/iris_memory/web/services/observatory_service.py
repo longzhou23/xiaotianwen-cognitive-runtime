@@ -106,6 +106,82 @@ _SAFE_PREFERENCE_PARAMETERS = {
     "relationship_familiarity",
 }
 
+_PLATFORM_LABELS = {
+    "qq": "QQ",
+    "wechat": "微信",
+    "wecom": "企业微信",
+    "telegram": "Telegram",
+    "discord": "Discord",
+    "feishu": "飞书",
+    "dingtalk": "钉钉",
+    "webui": "网页管理台",
+}
+_IDENTITY_STATUS_LABELS = {
+    "CONFIRMED": "已确认",
+    "POSSIBLE": "待确认",
+    "REVOKED": "已撤销",
+    "REJECTED": "冲突",
+}
+_EPISODE_STATE_LABELS = {
+    "OPEN": "进行中",
+    "SOFT_CLOSED": "暂时结束，等待后续互动",
+    "FINALIZED": "已结束并封存",
+    "INTERRUPTED": "运行中断",
+}
+_EVENT_HUMAN_LABELS = {
+    "EXPERIENCE": ("用户发来消息", "系统记录了这次用户互动。"),
+    "COGNITIVE_PROPOSAL": ("小天文形成判断", "系统记录了小天文当时形成的判断。"),
+    "NO_INTENT": ("小天文形成判断", "系统记录了小天文判断当前无需主动发言。"),
+    "HOST_OUTPUT": ("生成回复", "系统记录了实际生成的回复。"),
+    "DISPATCH": ("成功发送", "系统记录了回复已交给发送链路。"),
+    "DELIVERY": ("成功发送", "系统记录了回复已送达发送链路。"),
+    "TOOL_RESULT": ("工具返回结果", "系统记录了工具结果。"),
+    "INTENTIONAL_SILENCE": ("小天文保持安静", "系统记录了这次有意保持安静。"),
+    "TRIGGER_NO": ("没有触发回复", "系统记录了这次互动没有触发回复。"),
+    "GUARD_BLOCKED": ("回复被安全规则拦截", "系统记录了安全规则阻止了后续回复。"),
+}
+_OUTCOME_HUMAN_LABELS = {
+    "EXPLICIT_ACKNOWLEDGEMENT": "用户明确确认或回应了此前的回复",
+    "EXPLICIT_CORRECTION": "用户明确纠正了此前的回复",
+    "EXPLICIT_STOP_REQUEST": "用户明确要求停止当前互动",
+    "FOLLOWUP_QUESTION": "用户继续提出了问题",
+    "ANSWER_OBSERVED": "系统观察到回答已经产生",
+    "REACTION_OBSERVED": "系统观察到后续回应",
+    "REPLY_OBSERVED": "系统观察到后续回复",
+    "MENTION_OBSERVED": "系统观察到一次提及",
+    "CONVERSATION_CONTINUED": "系统观察到互动继续",
+    "TOOL_RESULT_RECEIVED": "系统收到工具结果",
+    "TOOL_SUCCEEDED": "系统观察到工具执行成功",
+    "TOOL_FAILED": "系统观察到工具执行失败",
+    "DISPATCH_OBSERVED": "系统观察到回复进入发送链路",
+    "DELIVERY_FAILED": "系统观察到回复发送失败",
+    "OBSERVATION_WINDOW_ELAPSED": "观察窗口结束",
+}
+_EXPLICITNESS_HUMAN_LABELS = {
+    "EXPLICIT": "是，用户直接表达",
+    "STRUCTURAL": "否，这是系统结构记录",
+    "ABSENCE": "否，这是根据观察窗口未发生的事实记录",
+}
+
+
+def _enum_value(value: object) -> str:
+    """Read a known enum value without guessing future or malformed values."""
+    raw = getattr(value, "value", None)
+    return raw if isinstance(raw, str) and raw else "UNKNOWN"
+
+
+def _safe_sequence(value: object) -> tuple[object, ...]:
+    if isinstance(value, (tuple, list, frozenset, set)):
+        return tuple(value)
+    return ()
+
+
+def _platform_label(platform: object) -> str:
+    if not isinstance(platform, str) or not platform.strip():
+        return "未知平台"
+    normalized = platform.strip().casefold()
+    return _PLATFORM_LABELS.get(normalized, platform.strip())
+
 
 def _opaque_ref(value: object, prefix: str = "ref") -> str:
     """Return a stable short reference without exposing the supplied value."""
@@ -848,6 +924,203 @@ class P1ObservatoryService:
         total = len(items)
         return {"available": True, "episodes": items[offset : offset + limit], "total": total, "limit": limit, "offset": offset}
 
+    @staticmethod
+    def _identity_claim_human(
+        claim: object,
+        entities_by_id: Mapping[str, object],
+        claims: tuple[object, ...],
+    ) -> dict[str, Any]:
+        mention = getattr(claim, "mention", None)
+        mention_text = mention.strip() if isinstance(mention, str) else "未命名"
+        candidate = getattr(claim, "candidate_entity", None)
+        candidate_id = candidate if isinstance(candidate, str) else ""
+        target = entities_by_id.get(candidate_id)
+        target_aliases = tuple(
+            alias.strip()
+            for alias in _safe_sequence(getattr(target, "aliases", ()))
+            if isinstance(alias, str) and alias.strip()
+        )
+        target_name = target_aliases[0] if target_aliases else (
+            "小天文自己" if candidate_id.startswith("agent:") else "未命名用户"
+        )
+        mention_key = mention_text.casefold()
+        related = tuple(
+            item
+            for item in claims
+            if isinstance(getattr(item, "mention", None), str)
+            and getattr(item, "mention").strip().casefold() == mention_key
+            and _enum_value(getattr(item, "status", None)) != "REVOKED"
+        )
+        targets = {
+            item.candidate_entity
+            for item in related
+            if isinstance(getattr(item, "candidate_entity", None), str)
+        }
+        raw_status = _enum_value(getattr(claim, "status", None))
+        conflict = len(targets) > 1 or raw_status == "REJECTED"
+        status_label = "冲突" if conflict else _IDENTITY_STATUS_LABELS.get(
+            raw_status, "未知状态，查看工程详情"
+        )
+        evidence = _safe_sequence(getattr(claim, "evidence", ()))
+        source = getattr(claim, "source", None)
+        source_text = source.strip() if isinstance(source, str) else ""
+        source_label = "人工确认" if source_text.casefold().startswith("admin:") else "系统记录"
+        return {
+            "summary": (
+                f"名称“{mention_text}”指向“{target_name}”，当前{status_label}；"
+                f"依据 {len(evidence)} 条；来源为{source_label}。"
+            ),
+            "name": mention_text,
+            "target_name": target_name,
+            "status": status_label,
+            "evidence_count": len(evidence),
+            "source_explanation": f"来源为{source_label}",
+            "known": raw_status in _IDENTITY_STATUS_LABELS or conflict,
+        }
+
+    @classmethod
+    def _identity_entity_human(
+        cls,
+        entity: object,
+        claims: tuple[object, ...],
+        self_entity: str,
+        entities_by_id: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
+        entity_id = getattr(entity, "id", None)
+        entity_id = entity_id if isinstance(entity_id, str) else ""
+        is_self = entity_id == self_entity
+        aliases = tuple(
+            alias.strip()
+            for alias in _safe_sequence(getattr(entity, "aliases", ()))
+            if isinstance(alias, str) and alias.strip()
+        )
+        entity_claims = tuple(
+            claim for claim in claims if getattr(claim, "candidate_entity", None) == entity_id
+        )
+        entities_by_id = entities_by_id or {entity_id: entity}
+        alias_views: list[dict[str, Any]] = []
+        for alias in aliases:
+            related = tuple(
+                claim
+                for claim in claims
+                if isinstance(getattr(claim, "mention", None), str)
+                and claim.mention.strip().casefold() == alias.casefold()
+            )
+            statuses = [
+                cls._identity_claim_human(claim, entities_by_id, claims).get("status")
+                for claim in related
+            ]
+            status = (
+                "冲突" if "冲突" in statuses else
+                "已确认" if "已确认" in statuses else
+                "待确认" if "待确认" in statuses else
+                "已撤销" if "已撤销" in statuses else
+                "未知状态，查看工程详情"
+            )
+            source_label = (
+                "人工确认"
+                if any(
+                    isinstance(getattr(claim, "source", None), str)
+                    and claim.source.casefold().startswith("admin:")
+                    for claim in related
+                )
+                else "系统记录"
+            )
+            alias_views.append(
+                {
+                    "name": alias,
+                    "status": status,
+                    "source_explanation": f"来源为{source_label}",
+                }
+            )
+        platform_bindings = [
+            {
+                "platform": _platform_label(platform),
+                "value": value if isinstance(value, str) else "未知值，查看工程详情",
+                "status": "已绑定" if isinstance(value, str) and value else "不可用",
+                "source_explanation": "来源为系统记录的平台绑定",
+            }
+            for platform, value in dict(getattr(entity, "platform_ids", {})).items()
+        ]
+        conflict_mentions: set[str] = set()
+        for claim in claims:
+            mention = getattr(claim, "mention", None)
+            if not isinstance(mention, str):
+                continue
+            related_targets = {
+                item.candidate_entity
+                for item in claims
+                if isinstance(getattr(item, "mention", None), str)
+                and item.mention.strip().casefold() == mention.strip().casefold()
+                and _enum_value(getattr(item, "status", None)) != "REVOKED"
+            }
+            if len(related_targets) > 1:
+                conflict_mentions.add(mention.strip().casefold())
+        valid_count = sum(
+            _enum_value(getattr(claim, "status", None)) in {"CONFIRMED", "POSSIBLE"}
+            and not (
+                isinstance(getattr(claim, "mention", None), str)
+                and claim.mention.strip().casefold() in conflict_mentions
+            )
+            for claim in entity_claims
+        )
+        revoked_count = sum(
+            _enum_value(getattr(claim, "status", None)) == "REVOKED" for claim in entity_claims
+        )
+        conflict_count = sum(
+            isinstance(getattr(claim, "mention", None), str)
+            and (
+                claim.mention.strip().casefold() in conflict_mentions
+                or _enum_value(getattr(claim, "status", None)) == "REJECTED"
+            )
+            for claim in entity_claims
+        )
+        confirmed_alias_count = sum(item["status"] == "已确认" for item in alias_views)
+        name = aliases[0] if aliases else ("小天文自己" if is_self else "未命名用户")
+        kind_label = "小天文自己" if is_self else "一个用户身份"
+        return {
+            "name": name,
+            "kind_label": kind_label,
+            "summary": (
+                f"这是{kind_label}；已绑定 {len(platform_bindings)} 个平台账号；"
+                f"有 {confirmed_alias_count} 个确认别名；当前有 {valid_count} 条有效、"
+                f"{conflict_count} 条冲突、{revoked_count} 条撤销声明。"
+            ),
+            "platforms": platform_bindings,
+            "aliases": alias_views,
+            "claim_counts": {
+                "valid": valid_count,
+                "conflict": conflict_count,
+                "revoked": revoked_count,
+            },
+            "known": bool(entity_id),
+        }
+
+    @classmethod
+    def _identity_human(
+        cls,
+        entities: tuple[object, ...],
+        claims: tuple[object, ...],
+        self_entity: str,
+    ) -> dict[str, Any]:
+        entities_by_id = {
+            entity.id: entity
+            for entity in entities
+            if isinstance(getattr(entity, "id", None), str)
+        }
+        entity_views = [
+            cls._identity_entity_human(entity, claims, self_entity, entities_by_id) for entity in entities
+        ]
+        claim_views = [
+            cls._identity_claim_human(claim, entities_by_id, claims) for claim in claims
+        ]
+        return {
+            "summary": f"当前记录了 {len(entities)} 个身份和 {len(claims)} 条身份声明。",
+            "entities": entity_views,
+            "claims": claim_views,
+            "empty_message": "当前没有可显示的身份记录。" if not entities and not claims else None,
+        }
+
     def admin_identity(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         """Return the bounded, administrator-only Identity record listing.
 
@@ -866,6 +1139,12 @@ class P1ObservatoryService:
             "claims": [],
             "entity_count": "Unavailable",
             "claim_count": "Unavailable",
+            "human": {
+                "summary": "身份详情当前不可用，不能把不可用误报成空数据。",
+                "entities": [],
+                "claims": [],
+                "empty_message": "身份库当前不可用。",
+            },
             "pagination": {
                 "limit": limit,
                 "offset": offset,
@@ -886,6 +1165,9 @@ class P1ObservatoryService:
             entities = tuple(registry.entities())
             claims = tuple(registry.all_claims())
             self_entity = str(getattr(registry, "self_entity", ""))
+            human_projection = self._identity_human(entities, claims, self_entity)
+            human_entities = human_projection["entities"]
+            human_claims = human_projection["claims"]
             entity_views = [
                 _admin_json(
                     {
@@ -894,9 +1176,10 @@ class P1ObservatoryService:
                         "platform_ids": dict(entity.platform_ids),
                         "aliases": list(entity.aliases),
                         "self": entity.id == self_entity,
+                        "human": human_entities[index],
                     }
                 )
-                for entity in entities
+                for index, entity in enumerate(entities)
             ]
             claim_views = [
                 _admin_json(
@@ -906,12 +1189,13 @@ class P1ObservatoryService:
                         "candidate_entity": claim.candidate_entity,
                         "evidence": list(claim.evidence),
                         "source": claim.source,
-                        "status": claim.status.value,
+                        "status": _enum_value(claim.status),
                         "confidence": claim.confidence,
                         "created_at": claim.created_at,
+                        "human": human_claims[index],
                     }
                 )
-                for claim in claims
+                for index, claim in enumerate(claims)
             ]
             status = "AVAILABLE" if entities or claims else "EMPTY"
             return {
@@ -922,6 +1206,13 @@ class P1ObservatoryService:
                 "claims": claim_views[offset : offset + limit],
                 "entity_count": len(entities),
                 "claim_count": len(claims),
+                "human": _admin_json(
+                    {
+                        **human_projection,
+                        "entities": human_entities[offset : offset + limit],
+                        "claims": human_claims[offset : offset + limit],
+                    }
+                ),
                 "pagination": {
                     "limit": limit,
                     "offset": offset,
@@ -956,6 +1247,11 @@ class P1ObservatoryService:
                 "total": "Unavailable",
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": "互动历史当前不可用，不能把不可用误报成空数据。",
+                    "episodes": [],
+                    "empty_message": "EpisodeStore 当前不可用。",
+                },
                 "reason": "episode_store_not_wired",
             }
         try:
@@ -985,6 +1281,11 @@ class P1ObservatoryService:
                 "total": len(selected),
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": f"当前显示 {len(selected)} 段互动记录。" if selected else "当前没有可显示的互动记录。",
+                    "episodes": [item["human"] for item in selected[offset : offset + limit]],
+                    "empty_message": "当前没有可显示的互动记录。" if not selected else None,
+                },
                 "reason": None if selected else "episode_store_empty",
             }
         except Exception:
@@ -996,6 +1297,11 @@ class P1ObservatoryService:
                 "total": "Unavailable",
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": "互动历史读取失败，不能把读取失败误报成空数据。",
+                    "episodes": [],
+                    "empty_message": "EpisodeStore 当前不可用。",
+                },
                 "reason": "episode_store_read_failed",
             }
 
@@ -1019,8 +1325,9 @@ class P1ObservatoryService:
             "schema": _ADMIN_EPISODE_SCHEMA,
             "available": True,
             "status": "AVAILABLE",
-            "episode": self._admin_episode_view(episode),
+            "episode": self._admin_episode_view(episode, outcomes),
             "outcomes": [self._admin_outcome_view(outcome, episode) for outcome in outcomes],
+            "human": _admin_json(self._admin_episode_human(episode, outcomes, persisted)),
             "review": _admin_json(persisted),
             "snapshot": _admin_json(snapshot),
             "attachments": _admin_json(attachments),
@@ -1047,6 +1354,11 @@ class P1ObservatoryService:
                 "total": "Unavailable",
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": "结果记录当前不可用，不能把不可用误报成空数据。",
+                    "outcomes": [],
+                    "empty_message": "OutcomeStore 当前不可用。",
+                },
                 "reason": "episode_store_not_wired",
             }
         needle = (query or "").strip().casefold()
@@ -1062,7 +1374,7 @@ class P1ObservatoryService:
                             (
                                 outcome.observation_id,
                                 outcome.target_episode_id,
-                                outcome.kind.value,
+                                _enum_value(outcome.kind),
                                 outcome.source_event_id,
                                 outcome.source_ref_id,
                             ),
@@ -1085,6 +1397,11 @@ class P1ObservatoryService:
                 "total": len(views),
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": f"当前显示 {len(views)} 条结果观察。" if views else "当前没有可显示的结果观察。",
+                    "outcomes": [item["human"] for item in views[offset : offset + limit]],
+                    "empty_message": "当前没有可显示的结果观察。" if not views else None,
+                },
                 "reason": None if views else "outcome_store_empty",
             }
         except Exception:
@@ -1096,6 +1413,11 @@ class P1ObservatoryService:
                 "total": "Unavailable",
                 "limit": limit,
                 "offset": offset,
+                "human": {
+                    "summary": "结果记录读取失败，不能把读取失败误报成空数据。",
+                    "outcomes": [],
+                    "empty_message": "OutcomeStore 当前不可用。",
+                },
                 "reason": "outcome_store_read_failed",
             }
 
@@ -1377,10 +1699,10 @@ class P1ObservatoryService:
 
     def _timeline(self, episode: Episode, outcomes: tuple[OutcomeObservation, ...], review: dict[str, Any]) -> list[dict[str, Any]]:
         entries = [
-            {"at": _timestamp(ref.observed_at), "kind": ref.kind.value, "ref_id": ref.ref_id, "source_event_id": ref.source_event_id, "trace_id": ref.trace_id}
+            {"at": _timestamp(ref.observed_at), "kind": _enum_value(ref.kind), "ref_id": ref.ref_id, "source_event_id": ref.source_event_id, "trace_id": ref.trace_id}
             for ref in episode.event_refs
         ]
-        entries.extend({"at": _timestamp(outcome.observed_at), "kind": "OUTCOME", "ref_id": outcome.observation_id, "outcome_kind": outcome.kind.value, "late_feedback": self._is_late(outcome, episode)} for outcome in outcomes)
+        entries.extend({"at": _timestamp(outcome.observed_at), "kind": "OUTCOME", "ref_id": outcome.observation_id, "outcome_kind": _enum_value(outcome.kind), "late_feedback": self._is_late(outcome, episode)} for outcome in outcomes)
         for run in review.get("runs", []):
             entries.append({"at": run.get("created_at"), "kind": "REVIEW", "ref_id": run.get("review_run_id"), "status": run.get("status")})
         return sorted(entries, key=lambda item: item.get("at") or "")
@@ -1389,11 +1711,11 @@ class P1ObservatoryService:
         payload = {
             "observation_id": outcome.observation_id,
             "target_episode_id": outcome.target_episode_id,
-            "kind": outcome.kind.value,
+            "kind": _enum_value(outcome.kind),
             "observed_at": _timestamp(outcome.observed_at),
             "source_event_id": outcome.source_event_id,
             "source_ref_id": outcome.source_ref_id,
-            "explicitness": outcome.explicitness.value,
+            "explicitness": _enum_value(outcome.explicitness),
             "confidence": outcome.confidence,
             "evidence": list(outcome.evidence),
             "producer": outcome.producer,
@@ -1402,9 +1724,218 @@ class P1ObservatoryService:
         payload["late_feedback"] = self._is_late(outcome, episode)
         return payload
 
+    @classmethod
+    def _event_human(cls, ref: object) -> dict[str, Any]:
+        kind = _enum_value(getattr(ref, "kind", None))
+        label, description = _EVENT_HUMAN_LABELS.get(
+            kind,
+            ("未知事件，查看工程详情", "系统保存了一个无法按当前版本解释的事件类型。"),
+        )
+        return {
+            "at": _timestamp(getattr(ref, "observed_at", None))
+            if isinstance(getattr(ref, "observed_at", None), datetime)
+            else None,
+            "label": label,
+            "description": description,
+            "source_explanation": "依据已持久化的 Episode 结构记录",
+            "known": kind in _EVENT_HUMAN_LABELS,
+        }
+
     @staticmethod
+    def _episode_human_title(episode: object) -> str:
+        snapshot = _admin_content_snapshot(getattr(episode, "topic_hint", None))
+        text = snapshot.get("text")
+        if snapshot.get("status") == "AVAILABLE" and isinstance(text, str) and text:
+            return text
+        return "未命名互动"
+
+    @classmethod
+    def _outcome_human(
+        cls, outcome: object, episode: object | None = None
+    ) -> dict[str, Any]:
+        kind = _enum_value(getattr(outcome, "kind", None))
+        explicitness = _enum_value(getattr(outcome, "explicitness", None))
+        evidence = _safe_sequence(getattr(outcome, "evidence", ()))
+        what_happened = _OUTCOME_HUMAN_LABELS.get(
+            kind, "未知类型，查看工程详情"
+        )
+        direct_expression = _EXPLICITNESS_HUMAN_LABELS.get(
+            explicitness, "未知是否直接表达，查看工程详情"
+        )
+        if kind == "EXPLICIT_CORRECTION":
+            impact = "只记录为事实观察，并可能进入 Review；不会自动修改人格、关系或回复偏好。"
+        elif kind == "EXPLICIT_ACKNOWLEDGEMENT":
+            impact = "只记录为事实观察，并可能进入 Review；不等于奖励，也不会自动修改人格、关系或回复偏好。"
+        elif kind in {"TOOL_SUCCEEDED", "TOOL_FAILED", "TOOL_RESULT_RECEIVED"}:
+            impact = "只记录工具结果事实；不会自动当作奖励或修改人格、关系、偏好。"
+        elif kind == "DELIVERY_FAILED":
+            impact = "只记录发送结果事实；不会自动修改未来行为或推断用户偏好。"
+        elif kind in _OUTCOME_HUMAN_LABELS:
+            impact = "只记录为事实观察；不会自动当作奖励或修改人格、关系、偏好。"
+        else:
+            impact = "影响未知，查看工程详情；系统不会据此推断奖励、人格、关系或偏好。"
+        late = (
+            cls._is_late(outcome, episode)
+            if episode is not None
+            else False
+        )
+        return {
+            "what_happened": what_happened,
+            "target_interaction": cls._episode_human_title(episode) if episode is not None else "未知互动，查看工程详情",
+            "basis": f"依据 {len(evidence)} 条已保存记录" if evidence else "没有附带依据记录",
+            "basis_details": list(evidence),
+            "evidence_count": len(evidence),
+            "source_explanation": "来源为系统记录",
+            "direct_expression": direct_expression,
+            "late_feedback": "是，发生在互动封存之后" if late else "否，在互动期间记录",
+            "current_impact": impact,
+            "known": kind in _OUTCOME_HUMAN_LABELS and explicitness in _EXPLICITNESS_HUMAN_LABELS,
+        }
+
+    @classmethod
+    def _human_review(cls, review: Mapping[str, Any]) -> dict[str, Any]:
+        status = review.get("status")
+        result_code = review.get("result_code")
+        run_count = review.get("run_count")
+        finding_count = review.get("finding_count")
+        evidence_count = review.get("evidence_count")
+        unavailable = status in {"NOT_WIRED", "UNAVAILABLE"} or result_code == "REVIEW_STORE_UNAVAILABLE"
+        if unavailable:
+            completion = "无法判断：Review 尚未接入或当前不可用。"
+            found = "系统没有足够的 Review 记录来说明发现。"
+        elif result_code == "NO_RUN":
+            completion = "尚未完成复盘：没有持久化 ReviewRun。"
+            found = "没有可报告的复盘发现。"
+        elif result_code == "NO_FINDINGS":
+            completion = "复盘已完成。"
+            found = "复盘已完成，但没有发现需要记录的事项。"
+        elif result_code in {"PROMOTION_DISABLED", "FINDINGS_NOT_PROMOTABLE"}:
+            completion = "复盘已完成。"
+            found = f"复盘记录了 {finding_count} 条可审计观察。"
+        elif isinstance(run_count, int) and run_count > 0:
+            completion = "复盘已完成。"
+            found = f"复盘记录了 {finding_count} 条可审计观察。"
+        else:
+            completion = "尚未完成复盘：当前记录不足以确认。"
+            found = "没有可报告的复盘发现。"
+        reason = review.get("result_reason")
+        if not isinstance(reason, str) or not reason:
+            reason = "当前没有可用的复盘说明。"
+        if evidence_count == 0:
+            evidence_explanation = reason
+        elif isinstance(evidence_count, int):
+            evidence_explanation = f"已有 {evidence_count} 条 Evidence；来源由既有 Review 记录提供。"
+        else:
+            evidence_explanation = "Evidence 数量当前不可用，不能把不可用当成 0。"
+        if unavailable:
+            long_term_impact = "无法从当前记录判断长期影响；复盘页面不会自行修改长期记忆或行为。"
+        elif evidence_count:
+            long_term_impact = "已生成可审计 Evidence；复盘本身不会自动修改长期记忆、人格、关系或回复行为。"
+        else:
+            long_term_impact = "没有 Evidence；复盘只保留事实观察，不会自动修改长期记忆或行为。"
+        findings: list[dict[str, Any]] = []
+        for run in review.get("runs", ()) if isinstance(review.get("runs"), (tuple, list)) else ():
+            if not isinstance(run, Mapping):
+                continue
+            for finding in run.get("findings", ()) if isinstance(run.get("findings"), (tuple, list)) else ():
+                if isinstance(finding, Mapping):
+                    claim = finding.get("claim")
+                    if isinstance(claim, str) and claim:
+                        findings.append({"what_was_found": claim})
+        return {
+            "completion": completion,
+            "what_was_found": found,
+            "findings": findings,
+            "evidence_explanation": evidence_explanation,
+            "long_term_impact": long_term_impact,
+            "known": not unavailable,
+        }
+
+    @classmethod
+    def _admin_episode_human(
+        cls,
+        episode: Episode,
+        outcomes: tuple[OutcomeObservation, ...],
+        review: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        refs = _safe_sequence(getattr(episode, "event_refs", ()))
+        state = _enum_value(getattr(episode, "state", None))
+        title = cls._episode_human_title(episode)
+        content = _admin_content_snapshot(getattr(episode, "topic_hint", None))
+        actual_replies = sum(_enum_value(getattr(ref, "kind", None)) == "HOST_OUTPUT" for ref in refs)
+        successful_sends = sum(
+            _enum_value(getattr(ref, "kind", None)) in {"DISPATCH", "DELIVERY"}
+            for ref in refs
+        )
+        timeline: list[dict[str, Any]] = [cls._event_human(ref) for ref in refs]
+        timeline.extend(
+            {
+                "at": _timestamp(getattr(outcome, "observed_at", None))
+                if isinstance(getattr(outcome, "observed_at", None), datetime)
+                else None,
+                "label": "用户明确纠正或确认"
+                if _enum_value(getattr(outcome, "kind", None))
+                in {"EXPLICIT_CORRECTION", "EXPLICIT_ACKNOWLEDGEMENT"}
+                else cls._outcome_human(outcome, episode)["what_happened"],
+                "description": cls._outcome_human(outcome, episode)["what_happened"],
+                "source_explanation": "依据已持久化的 Outcome 观察记录",
+                "late_feedback": cls._is_late(outcome, episode),
+            }
+            for outcome in outcomes
+        )
+        finalized_at = getattr(episode, "finalized_at", None)
+        if isinstance(finalized_at, datetime):
+            timeline.append(
+                {
+                    "at": _timestamp(finalized_at),
+                    "label": "互动封存",
+                    "description": "系统已将这段互动封存为可审计历史。",
+                    "source_explanation": "依据 Episode 的封存时间",
+                    "late_feedback": False,
+                }
+            )
+        timeline.sort(key=lambda item: item.get("at") or "")
+        if content.get("status") == "AVAILABLE":
+            content_explanation = "系统保存了以下可读的结构摘要。"
+        else:
+            content_explanation = "系统只保存了结构记录，没有可读正文。"
+        result = {
+            "title": title,
+            "summary": (
+                f"这段互动{_EPISODE_STATE_LABELS.get(state, '处于未知状态，查看工程详情')}，"
+                f"共 {sum(_enum_value(getattr(ref, 'kind', None)) == 'EXPERIENCE' for ref in refs)} 轮互动，"
+                f"实际回复 {actual_replies} 次，记录 {len(outcomes)} 个结果。"
+            ),
+            "state_label": _EPISODE_STATE_LABELS.get(state, "未知状态，查看工程详情"),
+            "opened_at": _timestamp(getattr(episode, "opened_at", None))
+            if isinstance(getattr(episode, "opened_at", None), datetime)
+            else None,
+            "ended_at": _timestamp(finalized_at)
+            if isinstance(finalized_at, datetime)
+            else _timestamp(getattr(episode, "last_activity_at", None))
+            if isinstance(getattr(episode, "last_activity_at", None), datetime)
+            else None,
+            "interaction_turns": sum(_enum_value(getattr(ref, "kind", None)) == "EXPERIENCE" for ref in refs),
+            "actual_replies": actual_replies,
+            "successful_sends": successful_sends,
+            "result_count": len(outcomes),
+            "content": {
+                "status": content.get("status"),
+                "text": content.get("text"),
+                "explanation": content_explanation,
+                "truncated": content.get("truncated", False),
+            },
+            "timeline": timeline,
+            "timeline_empty_message": "这段互动没有可显示的时间线步骤。" if not timeline else None,
+            "stored": "系统保存了 Episode、事件引用和结果观察的结构记录。",
+        }
+        if review is not None:
+            result["review"] = cls._human_review(review)
+        return result
+
+    @classmethod
     def _admin_episode_summary(
-        episode: Episode, outcomes: tuple[OutcomeObservation, ...]
+        cls, episode: Episode, outcomes: tuple[OutcomeObservation, ...]
     ) -> dict[str, Any]:
         return _admin_json(
             {
@@ -1420,11 +1951,12 @@ class P1ObservatoryService:
                 "outcome_count": len(outcomes),
                 "content_snapshot": _admin_content_snapshot(episode.topic_hint),
                 "provenance": list(episode.provenance),
+                "human": cls._admin_episode_human(episode, outcomes),
             }
         )
 
-    @staticmethod
-    def _admin_episode_view(episode: Episode) -> dict[str, Any]:
+    @classmethod
+    def _admin_episode_view(cls, episode: Episode, outcomes: tuple[OutcomeObservation, ...] = ()) -> dict[str, Any]:
         return _admin_json(
             {
                 "episode_id": episode.episode_id,
@@ -1441,39 +1973,48 @@ class P1ObservatoryService:
                 "unresolved_refs": list(episode.unresolved_refs),
                 "revision": episode.revision,
                 "provenance": list(episode.provenance),
+                "human": cls._admin_episode_human(episode, outcomes),
             }
         )
 
-    @staticmethod
+    @classmethod
     def _admin_outcome_view(
-        outcome: OutcomeObservation, episode: Episode | None = None
+        cls, outcome: OutcomeObservation, episode: Episode | None = None
     ) -> dict[str, Any]:
         return _admin_json(
             {
-                "observation_id": outcome.observation_id,
-                "target_episode_id": outcome.target_episode_id,
-                "kind": outcome.kind.value,
-                "observed_at": outcome.observed_at,
-                "source_event_id": outcome.source_event_id,
-                "source_ref_id": outcome.source_ref_id,
-                "actor_entity": outcome.actor_entity,
-                "target_entity": outcome.target_entity,
-                "explicitness": outcome.explicitness.value,
-                "confidence": outcome.confidence,
-                "evidence": list(outcome.evidence),
-                "producer": outcome.producer,
-                "provenance": list(outcome.provenance),
+                "observation_id": getattr(outcome, "observation_id", None),
+                "target_episode_id": getattr(outcome, "target_episode_id", None),
+                "kind": _enum_value(getattr(outcome, "kind", None)),
+                "observed_at": getattr(outcome, "observed_at", None),
+                "source_event_id": getattr(outcome, "source_event_id", None),
+                "source_ref_id": getattr(outcome, "source_ref_id", None),
+                "actor_entity": getattr(outcome, "actor_entity", None),
+                "target_entity": getattr(outcome, "target_entity", None),
+                "explicitness": _enum_value(getattr(outcome, "explicitness", None)),
+                "confidence": getattr(outcome, "confidence", None),
+                "evidence": list(_safe_sequence(getattr(outcome, "evidence", ()))),
+                "producer": getattr(outcome, "producer", None),
+                "provenance": list(_safe_sequence(getattr(outcome, "provenance", ()))),
                 "late_feedback": (
-                    P1ObservatoryService._is_late(outcome, episode)
+                    cls._is_late(outcome, episode)
                     if episode is not None
                     else None
                 ),
+                "human": cls._outcome_human(outcome, episode),
             }
         )
 
     @staticmethod
-    def _is_late(outcome: OutcomeObservation, episode: Episode) -> bool:
-        return bool(episode.finalized_at and outcome.observed_at > episode.finalized_at and outcome.target_episode_id == episode.episode_id)
+    def _is_late(outcome: object, episode: object) -> bool:
+        finalized_at = getattr(episode, "finalized_at", None)
+        observed_at = getattr(outcome, "observed_at", None)
+        return bool(
+            isinstance(finalized_at, datetime)
+            and isinstance(observed_at, datetime)
+            and observed_at > finalized_at
+            and getattr(outcome, "target_episode_id", None) == getattr(episode, "episode_id", None)
+        )
 
     @staticmethod
     def _episode_summary(episode: Episode, outcomes: tuple[OutcomeObservation, ...]) -> dict[str, Any]:
@@ -1494,21 +2035,19 @@ class P1ObservatoryService:
     def _human_counts(episode: Episode, outcomes: tuple[OutcomeObservation, ...]) -> dict[str, Any]:
         """Return structural, read-only counts; never infer turns by division."""
         refs = episode.event_refs
+        state_label = _EPISODE_STATE_LABELS.get(
+            _enum_value(getattr(episode, "state", None)), "未知状态，查看工程详情"
+        )
         return {
-            "lifecycle_label": {
-                EpisodeState.OPEN: "进行中",
-                EpisodeState.SOFT_CLOSED: "暂时结束，等待后续",
-                EpisodeState.FINALIZED: "已结束并封存",
-                EpisodeState.INTERRUPTED: "运行中断",
-            }[episode.state],
-            "interaction_turns": sum(ref.kind is EpisodeEventKind.EXPERIENCE for ref in refs),
+            "lifecycle_label": state_label,
+            "interaction_turns": sum(_enum_value(ref.kind) == "EXPERIENCE" for ref in refs),
             "cognitive_decisions": sum(
-                ref.kind in {EpisodeEventKind.COGNITIVE_PROPOSAL, EpisodeEventKind.NO_INTENT}
+                _enum_value(ref.kind) in {"COGNITIVE_PROPOSAL", "NO_INTENT"}
                 for ref in refs
             ),
-            "no_intent": sum(ref.kind is EpisodeEventKind.NO_INTENT for ref in refs),
-            "host_outputs": sum(ref.kind is EpisodeEventKind.HOST_OUTPUT for ref in refs),
-            "dispatches": sum(ref.kind is EpisodeEventKind.DISPATCH for ref in refs),
+            "no_intent": sum(_enum_value(ref.kind) == "NO_INTENT" for ref in refs),
+            "host_outputs": sum(_enum_value(ref.kind) == "HOST_OUTPUT" for ref in refs),
+            "dispatches": sum(_enum_value(ref.kind) == "DISPATCH" for ref in refs),
             "outcomes": len(outcomes),
         }
 

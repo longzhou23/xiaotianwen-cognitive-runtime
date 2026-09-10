@@ -597,6 +597,153 @@ def test_admin_record_views_project_contract_fields_paging_content_and_redaction
     assert outcomes["outcomes"][0]["target_episode_id"].startswith("episode:admin:")
 
 
+def test_admin_identity_human_projection_prefers_alias_and_explains_claim_state() -> None:
+    registry = EntityRegistry()
+    registry.register_entity(
+        CanonicalEntity(
+            "person:qq:human-user",
+            aliases=("小林",),
+            platform_ids={"qq": "human-uid"},
+        ),
+        source="system:platform_binding",
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="小林",
+            candidate_entity="agent:xiaotianwen",
+            evidence=("evidence:conflict",),
+            confidence=0.5,
+            source="system:ambiguous",
+            status=IdentityClaimStatus.POSSIBLE,
+        )
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="旧名字",
+            candidate_entity="person:qq:human-user",
+            evidence=("evidence:revoked",),
+            confidence=1.0,
+            source="admin:operator",
+            status=IdentityClaimStatus.REVOKED,
+        )
+    )
+    projection = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={"identity_available": True, "identity_registry": registry},
+    ).admin_identity()
+
+    human = projection["human"]
+    user = next(item for item in human["entities"] if item["name"] == "小林")
+    self_view = next(item for item in human["entities"] if item["name"] == "小天文")
+    assert user["summary"].startswith("这是一个用户身份；已绑定 1 个平台账号；")
+    assert "确认别名" in user["summary"]
+    assert user["platforms"][0]["platform"] == "QQ"
+    assert user["aliases"][0]["name"] == "小林"
+    assert self_view["name"] == "小天文"
+    assert any("当前冲突" in claim["summary"] for claim in human["claims"])
+    assert any("当前已撤销" in claim["summary"] for claim in human["claims"])
+
+
+def test_admin_episode_human_projection_has_four_stage_timeline_and_no_body_fallback() -> None:
+    store, episode, _outcomes, _records = _four_turn_fixture(state=EpisodeState.FINALIZED)
+    detail = P1ObservatoryService(store).admin_episode_detail(episode.episode_id)
+    human = detail["human"]
+    labels = [item["label"] for item in human["timeline"]]
+    assert {"用户发来消息", "小天文形成判断", "生成回复", "成功发送", "互动封存"} <= set(labels)
+    assert human["interaction_turns"] == 4
+    assert human["actual_replies"] == 4
+    assert human["successful_sends"] == 4
+    assert human["result_count"] == 4
+    assert human["content"]["explanation"] == "系统只保存了结构记录，没有可读正文。"
+    assert all("source_event_id" not in item for item in human["timeline"])
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (OutcomeKind.EXPLICIT_CORRECTION, "用户明确纠正了此前的回复"),
+        (OutcomeKind.EXPLICIT_ACKNOWLEDGEMENT, "用户明确确认或回应了此前的回复"),
+        (OutcomeKind.FOLLOWUP_QUESTION, "用户继续提出了问题"),
+        (OutcomeKind.DELIVERY_FAILED, "系统观察到回复发送失败"),
+    ],
+)
+def test_admin_outcome_human_projection_maps_kinds_and_closed_impact_rules(kind, expected) -> None:
+    store, episode, _outcomes, _records = _fixture(outcome_kind=kind)
+    outcome = P1ObservatoryService(store).admin_outcomes()["outcomes"][0]["human"]
+    assert outcome["what_happened"] == expected
+    assert outcome["target_interaction"] == "未命名互动"
+    assert outcome["direct_expression"] == "是，用户直接表达"
+    assert "不会自动" in outcome["current_impact"]
+    assert "人格" in outcome["current_impact"] or "未来行为" in outcome["current_impact"]
+
+
+def test_admin_human_review_explains_no_run_no_finding_and_promotion_gate() -> None:
+    store, episode, outcomes, records = _fixture(outcome_kind=None)
+    review_store = InMemoryReviewStore()
+    service = P1ObservatoryService(store, review_store, records)
+    no_run = service.admin_episode_detail(episode.episode_id)["human"]["review"]
+    assert no_run["completion"].startswith("尚未完成复盘")
+    assert "没有可报告" in no_run["what_was_found"]
+    assert "不会自动修改长期记忆或行为" in no_run["long_term_impact"]
+
+    class EmptyEngine:
+        def generate_findings(self, _episode, _outcomes, *, review_run_id):
+            return ()
+
+    facts = {(EvidenceSourceType.HOST_RESULT, ref_id): record for ref_id, record in records.items()}
+    run = review_episode(
+        episode,
+        outcomes,
+        review_store,
+        fact_envelopes=facts,
+        deterministic_engine=EmptyEngine(),
+    )
+    assert run is not None
+    no_findings = service.admin_episode_detail(episode.episode_id)["human"]["review"]
+    assert no_findings["completion"] == "复盘已完成。"
+    assert "没有发现需要记录" in no_findings["what_was_found"]
+
+    with_findings_store = InMemoryReviewStore()
+    correction_store, correction_episode, correction_outcomes, correction_records = _fixture()
+    correction_facts = {
+        (EvidenceSourceType.HOST_RESULT, ref_id): record
+        for ref_id, record in correction_records.items()
+    }
+    run = review_episode(
+        correction_episode,
+        correction_outcomes,
+        with_findings_store,
+        fact_envelopes=correction_facts,
+    )
+    assert run is not None
+    gated = P1ObservatoryService(
+        correction_store,
+        with_findings_store,
+        correction_records,
+        runtime_state={"promotion_enabled": False},
+    ).admin_episode_detail(correction_episode.episode_id)["human"]["review"]
+    assert "复盘记录了" in gated["what_was_found"]
+    assert "没有生成 Evidence" in gated["evidence_explanation"]
+    assert "不会自动修改" in gated["long_term_impact"]
+
+
+def test_admin_human_projection_unknown_enum_or_missing_field_fails_closed() -> None:
+    unknown = SimpleNamespace(
+        kind=SimpleNamespace(value="FUTURE_KIND"),
+        explicitness=SimpleNamespace(value="FUTURE_EXPLICITNESS"),
+        evidence=(),
+        target_episode_id="episode:unknown",
+    )
+    human = P1ObservatoryService._outcome_human(unknown)
+    assert human["what_happened"] == "未知类型，查看工程详情"
+    assert human["direct_expression"] == "未知是否直接表达，查看工程详情"
+    assert human["known"] is False
+    assert "不会据此推断奖励" in human["current_impact"]
+    missing = P1ObservatoryService._event_human(SimpleNamespace())
+    assert missing["label"] == "未知事件，查看工程详情"
+    assert missing["known"] is False
+
+
 def test_admin_record_views_redact_sensitive_keys_and_values_fail_closed() -> None:
     pem_header = "-----BEGIN RSA PRIVATE KEY-----"
     bearer = "Bearer abcdefghijklmnop123456"
@@ -793,6 +940,19 @@ def test_frontend_projects_runtime_status_and_does_not_show_stale_p1_gate_copy()
     assert "Finding 已记录，但当前不可 promotion" in source
     assert "引用：" in source
     assert "no_evidence_reason" in source
+
+
+def test_frontend_admin_records_default_to_human_view_and_keep_engineering_toggle():
+    view = Path(__file__).parents[2] / "iris_memory" / "web" / "frontend" / "src" / "views" / "CognitiveObservatoryView.vue"
+    source = view.read_text(encoding="utf-8")
+    assert "adminViewMode" in source
+    assert "易懂视图（默认）" in source
+    assert "工程详情" in source
+    assert "发生了什么" in source
+    assert "系统保存了什么" in source
+    assert "当前影响" in source
+    assert "系统只保存了结构记录，没有可读正文。" in source
+    assert "source_event_id" in source
 
 
 def test_frontend_exposes_p2b_shadow_contract_without_sensitive_fields():
