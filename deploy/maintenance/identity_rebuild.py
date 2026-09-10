@@ -56,6 +56,12 @@ _ALLOWED_SOURCE_TYPES = {
     "astrbot_platform_history",
 }
 _REFUSABLE_ALIAS_SOURCES = {"identity_export", "manual_confirmed_claim"}
+_STRUCTURED_NAME_ALIAS_SOURCES = {
+    "astrbot_platform_history",
+    "episode_event_ref",
+    "p2r0_archive",
+    "p2r1_authority",
+}
 
 
 class RebuildError(ValueError):
@@ -160,7 +166,18 @@ def _parse_provenance(raw: object, *, kind: str) -> dict[str, Any]:
     for label, value in (("account_id", account_id), ("platform", platform), ("uid", uid)):
         if not isinstance(value, str):
             raise RebuildError(f"{kind} {label} must be a string")
-    if kind in {"entity", "self_binding"} and (not account_id.strip() or not platform.strip() or not uid.strip()):
+    unbound_history_entity = (
+        kind == "entity"
+        and source_type == "astrbot_platform_history"
+        and basis == "platform_uid"
+        and role == "user"
+        and not account_id.strip()
+    )
+    if kind in {"entity", "self_binding"} and (
+        not platform.strip()
+        or not uid.strip()
+        or (not account_id.strip() and not unbound_history_entity)
+    ):
         raise RebuildError(f"{kind} provenance must include platform, account_id, and uid")
     return {
         "source_type": source_type,
@@ -462,10 +479,15 @@ def make_plan(current_path: Path, source_paths: list[Path]) -> PlanResult:
             note(item=item, action="accepted", category="SELF_BINDING_ADDED")
         elif kind == "alias":
             provenance_item = item["provenance"]
-            if (
-                provenance_item["basis"] != "manual_confirmed_alias"
-                or provenance_item["source_type"] not in _REFUSABLE_ALIAS_SOURCES
-            ):
+            is_confirmed_alias = (
+                provenance_item["basis"] == "manual_confirmed_alias"
+                and provenance_item["source_type"] in _REFUSABLE_ALIAS_SOURCES
+            )
+            is_structured_candidate = (
+                provenance_item["basis"] == "structured_name_candidate"
+                and provenance_item["source_type"] in _STRUCTURED_NAME_ALIAS_SOURCES
+            )
+            if not is_confirmed_alias and not is_structured_candidate:
                 note(item=item, action="skipped", category="ALIAS_SOURCE_NOT_AUTHORIZED")
                 continue
             try:
@@ -473,8 +495,11 @@ def make_plan(current_path: Path, source_paths: list[Path]) -> PlanResult:
             except RebuildError:
                 note(item=item, action="conflict", category="ALIAS_PAYLOAD_INVALID")
                 continue
-            if claim.status is not IdentityClaimStatus.CONFIRMED:
+            if is_confirmed_alias and claim.status is not IdentityClaimStatus.CONFIRMED:
                 note(item=item, action="skipped", category="UNCONFIRMED_ALIAS_SKIPPED")
+                continue
+            if is_structured_candidate and claim.status is not IdentityClaimStatus.POSSIBLE:
+                note(item=item, action="skipped", category="STRUCTURED_ALIAS_STATUS_UNSUPPORTED")
                 continue
             if claim.candidate_entity not in entities:
                 note(item=item, action="conflict", category="ALIAS_UNKNOWN_ENTITY")
@@ -483,10 +508,13 @@ def make_plan(current_path: Path, source_paths: list[Path]) -> PlanResult:
                 note(item=item, action="skipped", category="ALIAS_DUPLICATE")
                 continue
             claims.append(claim)
-            entities[claim.candidate_entity]["aliases"] = sorted(
-                set(entities[claim.candidate_entity]["aliases"]) | {claim.mention}
-            )
-            note(item=item, action="accepted", category="CONFIRMED_ALIAS_ADDED")
+            if claim.status is IdentityClaimStatus.CONFIRMED:
+                entities[claim.candidate_entity]["aliases"] = sorted(
+                    set(entities[claim.candidate_entity]["aliases"]) | {claim.mention}
+                )
+                note(item=item, action="accepted", category="CONFIRMED_ALIAS_ADDED")
+            else:
+                note(item=item, action="accepted", category="STRUCTURED_NAME_CANDIDATE_ADDED")
 
     if not self_binding_seen:
         conflicts.append(

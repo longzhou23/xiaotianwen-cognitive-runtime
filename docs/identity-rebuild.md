@@ -16,11 +16,11 @@
 
 维护工具默认从本仓库的 Iris 源码导入 `EntityRegistry`；在服务器上从临时维护路径执行时，可以用 `IRIS_PLUGIN_ROOT` 指向已部署的 Iris 插件源码目录。这个环境变量只改变代码导入位置，不改变身份数据路径或写入门禁。
 
-Episode/Event、AstrBot 会话元数据、P2r0 archive 和语义 authority 都只能由受信任的导出器先转换为上述无正文结构化 export。工具不会从昵称、群名片、代词、消息相似度、最近发言者或模型输出补造身份；P2r0/P2r1 的平台消息 `platform_id`、`account_id`、`conversation_id`、`message_id`、`trace_id` 和 event/ref ID 也不会被当作用户 UID。Episode/Event 中只有同一结构化记录内明确声明 `role`、平台、账号和 UID 的身份对象才会进入导出；仅有 `actor_entity.entity_id` 或 `source=platform_uid` 仍缺账号/角色时进入 skipped。P2r0 的 reply-link 事实和 P2r1 authority 不会被当作 alias 证据。
+Episode/Event、AstrBot 会话元数据、P2r0 archive 和语义 authority 都只能由受信任的导出器先转换为上述无正文结构化 export。工具不会从代词、消息相似度、最近发言者或模型输出补造身份；P2r0/P2r1 的平台消息 `platform_id`、`account_id`、`conversation_id`、`message_id`、`trace_id` 和 event/ref ID 也不会被当作用户 UID。Episode/Event 中只有同一结构化记录内明确声明 `role`、平台、账号和 UID 的身份对象才会进入导出；同一对象里的 `display_name`、`sender_name`、`nickname`、`card` 或 `user_name` 只作为结构化名称观察，必须在同一 scope 下有至少两条独立记录且名称规范化后一致，才会生成 `POSSIBLE` 历史名称候选；竞争名称进入 pending/skipped，不会自动挑选。AstrBot `platform_message_history` 中，如果同一行同时给出有效 `platform_id`、`sender_id` 和结构化 `sender_name`，即使没有可继承的 bot account context，也只按该 `(platform, uid)` 生成用户实体和待确认名称候选；没有结构化名称的无 account 行仍进入 skipped。仅有 `actor_entity.entity_id` 或 `source=platform_uid` 仍缺账号/角色时进入 skipped。P2r0 的 reply-link 事实和 P2r1 authority 不会被当作 alias 证据。
 
 ## 历史导出器
 
-导出器只访问固定的 JSON/JSONL 字段路径，不访问 `content`、昵称、evidence 正文或模型输出。它也可以只读查询 AstrBot `data_v4.db` 的 `platform_message_history(platform_id, user_id, sender_id)` 三个列；其中 `sender_id` 才是明确的 sender UID，`user_id` 只作为父 scope 保留在行 hash 中，绝不当作用户 UID，`content` 列不会被 SELECT。P2r0 的已验证 adapter message identity 只用于继承同平台唯一的 bot `account_id`，并形成跨记录一致的 SELF binding；多个 account 值会阻断导出。冲突校验使用全部 binding 记录，但每个导出的 sender 只保留一个确定性的 account witness hash，避免大历史按行复制全部 binding provenance。导出器可接收 Episode/Event、P2r0、P2r1、AstrBot metadata 和当前 Identity envelope；当前 envelope 中只有 `CONFIRMED` claim 才能作为 alias 候选，`POSSIBLE` 等 claim 会被计入 skipped。所有输出都是私有维护文件，stdout 只输出状态、路径和匿名计数：
+导出器只访问固定的 JSON/JSONL 字段路径，不访问 `content`、evidence 正文或模型输出。它也可以只读查询 AstrBot `data_v4.db` 的 `platform_message_history(id, platform_id, user_id, sender_id, sender_name, created_at, updated_at)`；其中 `sender_id` 才是明确的 sender UID，`user_id` 作为父 scope，`sender_name` 只有在同一行才作为结构化名称，`content` 列不会被 SELECT。空值、平台默认词、纯数字、UID 同值和机器人/系统占位符都会被过滤。P2r0 的已验证 adapter message identity 只用于继承同平台唯一的 bot `account_id`，并形成跨记录一致的 SELF binding；多个 account 值会阻断导出。冲突校验使用全部 binding 记录，但每个导出的 sender 只保留一个确定性的 account witness hash，避免大历史按行复制全部 binding provenance。导出器可接收 Episode/Event、P2r0、P2r1、AstrBot metadata 和当前 Identity envelope；当前 envelope 中只有 `CONFIRMED` claim 才能作为已生效 alias，结构化历史名称只生成带 provenance 的 `POSSIBLE` 候选并保持待人工确认。所有输出都是私有维护文件，stdout 只输出状态、路径和匿名计数：
 
 ```bash
 python3 deploy/maintenance/identity_export.py \

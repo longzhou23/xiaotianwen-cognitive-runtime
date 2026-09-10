@@ -10,6 +10,7 @@ import pytest
 from deploy.maintenance.identity_rebuild import (
     EntityRegistry,
     IdentityConfig,
+    IdentityClaimStatus,
     RebuildError,
     _guarded_replace,
     _owner_lock,
@@ -95,6 +96,23 @@ def _alias(mention: str, entity_id: str, *, status: str = "CONFIRMED") -> dict:
     )
 
 
+def _structured_alias(mention: str, entity_id: str) -> dict:
+    return _record(
+        "alias",
+        {
+            "mention": mention,
+            "candidate_entity": entity_id,
+            "evidence": ["record:" + ("b" * 64), "record:" + ("c" * 64)],
+            "confidence": 0.7,
+            "source": "system:structured_name_history",
+            "status": "POSSIBLE",
+            "created_at": "2026-09-10T00:00:00+00:00",
+        },
+        source_type="astrbot_platform_history",
+        basis="structured_name_candidate",
+    )
+
+
 def _write_source(path: Path, *records: dict, authorized: bool = True) -> None:
     path.write_text(json.dumps(_source(*records, authorized=authorized), ensure_ascii=False), encoding="utf-8")
 
@@ -154,6 +172,44 @@ def test_alias_conflict_is_preserved_but_blocks_apply_and_resolves_fail_closed(t
     candidate = tmp_path / "candidate.json"
     candidate.write_bytes(result.candidate_bytes)
     assert EntityRegistry(storage_path=candidate).resolve_alias("ambiguous") is None
+
+
+def test_structured_name_candidate_is_applied_as_possible_without_becoming_confirmed(tmp_path: Path):
+    current = tmp_path / "current.json"
+    source = tmp_path / "source.json"
+    _current(current)
+    _write_source(
+        source,
+        _self_binding(),
+        _entity("person:qq:history", "qq", "6001"),
+        _structured_alias("Fixture History", "person:qq:history"),
+    )
+    result = make_plan(current, [source])
+    assert result.manifest["apply_blocked"] is False
+    assert any(
+        item["category"] == "STRUCTURED_NAME_CANDIDATE_ADDED"
+        for item in result.manifest["provenance"]
+    )
+    candidate = tmp_path / "candidate.json"
+    candidate.write_bytes(result.candidate_bytes)
+    registry = EntityRegistry(storage_path=candidate)
+    claim = next(item for item in registry.all_claims() if item.mention == "Fixture History")
+    assert claim.status is IdentityClaimStatus.POSSIBLE
+    assert registry.resolve_alias("Fixture History") is None
+
+
+def test_unbound_structured_history_entity_is_allowed_for_platform_uid(tmp_path: Path):
+    current = tmp_path / "current.json"
+    source = tmp_path / "source.json"
+    _current(current)
+    entity = _entity("person:qq:history-only", "qq", "6002")
+    entity["provenance"]["source_type"] = "astrbot_platform_history"
+    entity["provenance"]["account_id"] = ""
+    _write_source(source, _self_binding(), entity)
+
+    result = make_plan(current, [source])
+    assert result.manifest["apply_blocked"] is False
+    assert result.manifest["counts"]["entities_after"] == 2
 
 
 @pytest.mark.parametrize(

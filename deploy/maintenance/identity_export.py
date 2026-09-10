@@ -2,8 +2,10 @@
 
 The exporter reads JSONL envelopes and an optional read-only AstrBot metadata
 database from explicitly selected historical stores, but follows a small
-allowlist of identity fields.  It never reads message content, display names,
-evidence text, or free-form model output.  Message identity fields such as
+allowlist of identity fields.  It never reads message content, evidence text,
+or free-form model output.  Structured sender names are accepted only when
+they are carried beside the matching platform and sender UID in the same
+record (or an explicitly bounded scope).  Message identity fields such as
 ``message_id``, ``trace_id`` and ``account_id`` in a P2r0/P2r1
 platform-message object cannot produce a user record; a verified account
 binding may only contribute to the separate SELF binding path.
@@ -25,10 +27,12 @@ import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 try:
     from .identity_rebuild import (
@@ -69,6 +73,14 @@ _EXPLICIT_IDENTITY_KEYS = (
 )
 _MESSAGE_IDENTITY_KEYS = frozenset(
     {"platform_id", "conversation_id", "message_id", "source_event_id", "trace_id", "execution_record_id"}
+)
+_STRUCTURED_NAME_KEYS = ("display_name", "sender_name", "nickname", "card", "user_name")
+_NAME_PLACEHOLDERS = frozenset(
+    {
+        "anonymous", "guest", "member", "user", "unknown", "unknown user", "null", "none",
+        "bot", "qq用户", "用户", "普通用户", "匿名用户", "未知用户", "未命名", "未设置", "无名",
+        "群成员", "未知昵称", "无昵称", "机器人", "系统消息",
+    }
 )
 _MAX_SAMPLES = 8
 
@@ -116,6 +128,72 @@ def _component(value: object, label: str) -> str:
     if not normalized or any(char.isspace() or ord(char) < 32 for char in normalized):
         raise ExportError(f"{label} is not a concrete identity component")
     return normalized
+
+
+def _name_key(value: str) -> str:
+    """Normalize only a structured display field for equality checks."""
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
+def _structured_name(value: object, *, uid: str, platform: str) -> str | None:
+    """Return a safe structured name, never a message/body-derived value."""
+    if not isinstance(value, str):
+        return None
+    name = " ".join(unicodedata.normalize("NFKC", value).split()).strip()
+    if not name or len(name) > 128 or any(ord(char) < 32 for char in name):
+        return None
+    key = _name_key(name)
+    if not key or key in _NAME_PLACEHOLDERS:
+        return None
+    if key == _name_key(uid) or re.fullmatch(r"[0-9]+", key):
+        return None
+    # Reject platform/default labels and values that are only an account key.
+    if key in {f"{platform} user", f"{platform}用户", f"{platform} member", f"{platform}成员"}:
+        return None
+    if re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", key) and any(
+        marker in key for marker in ("user", "member", "guest", "unknown", "anonymous")
+    ):
+        return None
+    return name
+
+
+def _structured_name_fields(value: object, *, uid: str, platform: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, dict):
+        return ()
+    result: list[tuple[str, str]] = []
+    for key in _STRUCTURED_NAME_KEYS:
+        if key not in value:
+            continue
+        name = _structured_name(value[key], uid=uid, platform=platform)
+        if name is not None:
+            result.append((key, name))
+    return tuple(result)
+
+
+def _observed_at(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _record_scope(envelope: object, *, record_hash: str) -> str:
+    """Use a declared scope only; never infer one from message text."""
+    if not isinstance(envelope, dict):
+        return f"record:{record_hash}"
+    for container in (envelope, envelope.get("payload")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("scope_id", "session_id", "conversation_id", "user_id"):
+            value = container.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return f"{key}:{str(value).strip()}"
+    return f"record:{record_hash}"
 
 
 def _path_hash(value: object) -> str:
@@ -357,6 +435,8 @@ def _observation(
     field_path: str,
     record_key: str | None = None,
     inherited_evidence_refs: list[str] | None = None,
+    scope: str | None = None,
+    observed_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         **identity,
@@ -365,6 +445,8 @@ def _observation(
         "field_path": field_path or "record",
         "record_key": record_key or record_hash,
         "inherited_evidence_refs": sorted(set(inherited_evidence_refs or [])),
+        "scope": scope or record_key or record_hash,
+        "observed_at": observed_at,
     }
 
 
@@ -383,6 +465,102 @@ def _merge_provenance(observations: list[dict[str, Any]], *, basis: str) -> dict
         basis=basis,
         evidence_refs=refs,
     )
+
+
+def _structured_name_records(
+    observations_by_entity: Mapping[tuple[str, str], list[dict[str, Any]]],
+    *,
+    emitted_entities: set[tuple[str, str]],
+    skipped: Counter[str],
+    samples: dict[str, list[dict[str, str]]],
+    counts: Counter[str],
+) -> list[dict[str, Any]]:
+    """Build POSSIBLE alias records from repeated, same-scope structured names."""
+    records: list[dict[str, Any]] = []
+    for (platform, uid), observations in sorted(observations_by_entity.items()):
+        if (platform, uid) not in emitted_entities:
+            continue
+        by_name: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in observations:
+            by_name[item["name_key"]].append(item)
+        if len(by_name) > 1:
+            skipped["STRUCTURED_NAME_CONFLICT_PENDING"] += 1
+            for item in observations:
+                _add_sample(
+                    samples,
+                    "STRUCTURED_NAME_CONFLICT_PENDING",
+                    {"record_hash": item["record_hash"], "field_path": item["field_path"]},
+                )
+            counts["structured_name_conflict_entities"] += 1
+            continue
+        if not by_name:
+            continue
+        name_observations = next(iter(by_name.values()))
+        account_ids = {item["account_id"] for item in name_observations}
+        if len(account_ids) > 1:
+            skipped["STRUCTURED_NAME_ACCOUNT_CONFLICT_PENDING"] += 1
+            for item in name_observations:
+                _add_sample(
+                    samples,
+                    "STRUCTURED_NAME_ACCOUNT_CONFLICT_PENDING",
+                    {"record_hash": item["record_hash"], "field_path": item["field_path"]},
+                )
+            counts["structured_name_conflict_entities"] += 1
+            continue
+        by_scope: defaultdict[str, set[str]] = defaultdict(set)
+        for item in name_observations:
+            by_scope[item["scope"]].add(item["record_key"])
+        if max((len(records_for_scope) for records_for_scope in by_scope.values()), default=0) < 2:
+            skipped["STRUCTURED_NAME_INSUFFICIENT_EVIDENCE"] += 1
+            item = name_observations[0]
+            _add_sample(
+                samples,
+                "STRUCTURED_NAME_INSUFFICIENT_EVIDENCE",
+                {"record_hash": item["record_hash"], "field_path": item["field_path"]},
+            )
+            continue
+        unique_observations = {
+            (item["record_hash"], item["field_path"]): item for item in name_observations
+        }
+        evidence_items = list(unique_observations.values())
+        evidence_refs = [f"record:{item['record_hash']}" for item in evidence_items]
+        evidence_refs.extend(
+            ref for item in evidence_items for ref in item.get("inherited_evidence_refs", [])
+        )
+        latest = max(
+            evidence_items,
+            key=lambda item: (item.get("observed_at") or "", item["record_hash"], item["field_path"]),
+        )
+        created_at = latest.get("observed_at") or datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat()
+        payload = {
+            "mention": latest["name"],
+            "candidate_entity": f"person:{platform}:{uid}",
+            "evidence": sorted(set(evidence_refs)),
+            "confidence": 0.7,
+            "source": "system:structured_name_history",
+            "status": "POSSIBLE",
+            "created_at": created_at,
+        }
+        first = sorted(evidence_items, key=lambda item: (item["record_hash"], item["field_path"]))[0]
+        records.append(
+            _record(
+                kind="alias",
+                payload=payload,
+                provenance=_provenance(
+                    source_type=first["source_type"],
+                    record_hash=first["record_hash"],
+                    field_path=first["field_path"],
+                    role="user",
+                    account_id=first["account_id"],
+                    platform=platform,
+                    uid=uid,
+                    basis="structured_name_candidate",
+                    evidence_refs=sorted(set(evidence_refs)),
+                ),
+            )
+        )
+        counts["structured_name_candidates"] += 1
+    return records
 
 
 def _confirmed_claim_records(path: Path, *, skipped: Counter[str], samples: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]]:
@@ -467,6 +645,8 @@ def export_history(
     conflict_samples: dict[str, list[dict[str, str]]] = {}
     input_meta: list[dict[str, Any]] = []
     user_observations: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    name_observations: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    emitted_entities: set[tuple[str, str]] = set()
     self_observations: list[dict[str, Any]] = []
     adapter_accounts: defaultdict[str, set[str]] = defaultdict(set)
     # Keep one deterministic witness per account.  Every matching DB row used
@@ -553,11 +733,29 @@ def export_history(
                     record_hash=record_hash,
                     field_path=field_path,
                     record_key=f"{record_hash}:{lines}",
+                    scope=_record_scope(envelope, record_hash=record_hash),
+                    observed_at=_observed_at(
+                        envelope.get("updated_at")
+                        if isinstance(envelope, dict)
+                        else None
+                    )
+                    or _observed_at(envelope.get("created_at") if isinstance(envelope, dict) else None),
                 )
                 if identity["role"] == "self":
                     self_observations.append(observation)
                 else:
                     user_observations[(identity["platform"], identity["uid"])].append(observation)
+                    for name_key, name in _structured_name_fields(
+                        value, uid=identity["uid"], platform=identity["platform"]
+                    ):
+                        name_observations[(identity["platform"], identity["uid"])].append(
+                            {
+                                **observation,
+                                "name": name,
+                                "name_key": _name_key(name),
+                                "field_path": f"{field_path}.{name_key}",
+                            }
+                        )
                 counts["explicit_identity_observations"] += 1
         input_meta.append(
             {
@@ -574,22 +772,32 @@ def export_history(
         try:
             db_raw = astrbot_db_path.read_bytes()
             connection = sqlite3.connect(f"file:{astrbot_db_path}?mode=ro", uri=True)
+            columns = {
+                str(item[1])
+                for item in connection.execute("PRAGMA table_info(platform_message_history)")
+            }
+            required_columns = ("id", "platform_id", "user_id", "sender_id")
+            if not set(required_columns).issubset(columns):
+                raise ExportError("AstrBot metadata database lacks required sender identity columns")
+            selected_columns = list(required_columns)
+            for optional in ("sender_name", "created_at", "updated_at"):
+                if optional in columns:
+                    selected_columns.append(optional)
+            query_columns = ", ".join(selected_columns)
             rows = connection.execute(
-                "SELECT id, platform_id, user_id, sender_id "
-                "FROM platform_message_history ORDER BY id"
+                f"SELECT {query_columns} FROM platform_message_history ORDER BY id"
             )
             db_records = 0
-            for row_id, platform_value, scope_value, sender_value in rows:
+            for raw_row in rows:
+                row = dict(zip(selected_columns, raw_row, strict=True))
+                row_id = row["id"]
+                platform_value = row["platform_id"]
+                scope_value = row["user_id"]
+                sender_value = row["sender_id"]
                 db_records += 1
                 counts["records_scanned"] += 1
-                row = {
-                    "table": "platform_message_history",
-                    "id": row_id,
-                    "platform_id": platform_value,
-                    "user_id": scope_value,
-                    "sender_id": sender_value,
-                }
-                record_hash = _row_hash(row)
+                row_for_hash = {"table": "platform_message_history", **row}
+                record_hash = _row_hash(row_for_hash)
                 try:
                     platform = _component(platform_value, "platform").casefold()
                 except ExportError:
@@ -610,16 +818,30 @@ def export_history(
                         {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
                     )
                     continue
+                structured_name = (
+                    _structured_name(row.get("sender_name"), uid=sender_id, platform=platform)
+                    if "sender_name" in row
+                    else None
+                )
+                scope_text = str(scope_value).strip() if scope_value is not None else ""
+                scope_key = f"user_id:{scope_text}" if scope_text else f"record:{record_hash}"
                 accounts = adapter_accounts.get(platform, set())
                 if not accounts:
-                    skipped["MISSING_ACCOUNT_CONTEXT"] += 1
-                    _add_sample(
-                        skip_samples,
-                        "MISSING_ACCOUNT_CONTEXT",
-                        {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
-                    )
-                    continue
-                if len(accounts) > 1:
+                    # A same-row structured sender name is sufficient for a
+                    # user platform binding. Nameless rows remain fail-closed
+                    # because they have no usable evidence beyond the sender
+                    # UID.
+                    if structured_name is None:
+                        skipped["MISSING_ACCOUNT_CONTEXT"] += 1
+                        _add_sample(
+                            skip_samples,
+                            "MISSING_ACCOUNT_CONTEXT",
+                            {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
+                        )
+                        continue
+                    account_id = ""
+                    inherited_evidence_refs: list[str] = []
+                elif len(accounts) > 1:
                     conflict_counts["ACCOUNT_BINDING_CONFLICT"] += 1
                     _add_sample(
                         conflict_samples,
@@ -627,7 +849,11 @@ def export_history(
                         {"record_hash": record_hash, "field_path": "platform_message_history.sender_id"},
                     )
                     continue
-                account_id = next(iter(accounts))
+                else:
+                    account_id = next(iter(accounts))
+                    inherited_evidence_refs = [
+                        f"record:{min(adapter_account_refs[(platform, account_id)])}"
+                    ]
                 if sender_id == account_id:
                     skipped["SELF_ACCOUNT_ROW"] += 1
                     _add_sample(
@@ -650,11 +876,32 @@ def export_history(
                         record_hash=record_hash,
                         field_path="platform_message_history.sender_id",
                         record_key=record_hash,
-                        inherited_evidence_refs=[
-                            f"record:{min(adapter_account_refs[(platform, account_id)])}"
-                        ],
+                        inherited_evidence_refs=inherited_evidence_refs,
+                        scope=scope_key,
+                        observed_at=_observed_at(row.get("updated_at"))
+                        or _observed_at(row.get("created_at")),
                     )
                 )
+                if structured_name is not None:
+                    name_observations[(platform, sender_id)].append(
+                        {
+                            "name": structured_name,
+                            "name_key": _name_key(structured_name),
+                            "source_type": "astrbot_platform_history",
+                            "record_hash": record_hash,
+                            "record_key": record_hash,
+                            "field_path": "platform_message_history.sender_name",
+                            "role": "user",
+                            "account_id": account_id,
+                            "platform": platform,
+                            "uid": sender_id,
+                            "scope": scope_key,
+                            "observed_at": _observed_at(row.get("updated_at"))
+                            or _observed_at(row.get("created_at")),
+                            "inherited_evidence_refs": inherited_evidence_refs,
+                        }
+                    )
+                    counts["structured_name_observations"] += 1
                 counts["explicit_identity_observations"] += 1
             connection.close()
         except (OSError, sqlite3.Error) as exc:
@@ -667,7 +914,7 @@ def export_history(
                 "sha256": _sha256_bytes(db_raw),
                 "records": db_records,
                 "malformed": 0,
-                "selected_columns": ["platform_id", "user_id", "sender_id"],
+                "selected_columns": selected_columns,
                 "content_column_read": False,
             }
         )
@@ -705,7 +952,18 @@ def export_history(
                 provenance=_merge_provenance(observations, basis="platform_uid"),
             )
         )
+        emitted_entities.add((platform, uid))
         counts["entities_emitted"] += 1
+
+    records.extend(
+        _structured_name_records(
+            name_observations,
+            emitted_entities=emitted_entities,
+            skipped=skipped,
+            samples=skip_samples,
+            counts=counts,
+        )
+    )
 
     if self_observations:
         self_keys = {
@@ -745,7 +1003,10 @@ def export_history(
 
     if identity_registry_path is not None:
         records.extend(_confirmed_claim_records(identity_registry_path, skipped=skipped, samples=skip_samples))
-        counts["confirmed_alias_records"] += sum(item["kind"] == "alias" for item in records)
+        counts["confirmed_alias_records"] += sum(
+            item["kind"] == "alias" and item["payload"].get("status") == "CONFIRMED"
+            for item in records
+        )
 
     records.sort(key=lambda item: (item["kind"], item["payload"].get("id", item["payload"].get("mention", ""))))
     counts["accepted"] = len(records)

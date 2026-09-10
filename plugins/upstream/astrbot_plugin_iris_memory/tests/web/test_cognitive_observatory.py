@@ -634,14 +634,79 @@ def test_admin_identity_human_projection_prefers_alias_and_explains_claim_state(
 
     human = projection["human"]
     user = next(item for item in human["entities"] if item["name"] == "小林")
-    self_view = next(item for item in human["entities"] if item["name"] == "小天文")
+    self_view = next(item for item in human["entities"] if item["name_status"] == "机器人账号")
     assert user["summary"].startswith("这是一个用户身份；已绑定 1 个平台账号；")
     assert "确认别名" in user["summary"]
     assert user["platforms"][0]["platform"] == "QQ"
     assert user["aliases"][0]["name"] == "小林"
-    assert self_view["name"] == "小天文"
+    assert self_view["name"] == "小天文（机器人账号）"
+    assert self_view["name_status"] == "机器人账号"
     assert any("当前冲突" in claim["summary"] for claim in human["claims"])
     assert any("当前已撤销" in claim["summary"] for claim in human["claims"])
+
+
+def test_admin_identity_human_projection_uses_candidates_then_masked_bindings_and_fail_closed_unknown_fields() -> None:
+    registry = EntityRegistry()
+    registry.register_entity(
+        CanonicalEntity(
+            "person:qq:confirmed",
+            aliases=("Fixture Confirmed",),
+            platform_ids={"qq": "11112222"},
+        ),
+        source="fixture:confirmed",
+    )
+    registry.register_entity(
+        CanonicalEntity("person:qq:pending", platform_ids={"qq": "33334444"}),
+        source="fixture:pending",
+    )
+    registry.add_claim(
+        IdentityClaim(
+            mention="Fixture History",
+            candidate_entity="person:qq:pending",
+            evidence=("record:fixture-a", "record:fixture-b"),
+            confidence=0.7,
+            source="system:structured_name_history",
+            status=IdentityClaimStatus.POSSIBLE,
+        )
+    )
+    registry.register_entity(
+        CanonicalEntity("person:qq:suffix-a", platform_ids={"qq": "55550001"}),
+        source="fixture:suffix-a",
+    )
+    registry.register_entity(
+        CanonicalEntity("person:qq:suffix-b", platform_ids={"qq": "66660001"}),
+        source="fixture:suffix-b",
+    )
+    registry.register_entity(
+        CanonicalEntity("person:unbound"),
+        source="fixture:unbound",
+    )
+    projection = P1ObservatoryService(
+        InMemoryEpisodeStore(),
+        runtime_state={"identity_available": True, "identity_registry": registry},
+    ).admin_identity()
+    by_name = {item["name"]: item for item in projection["human"]["entities"]}
+
+    assert by_name["Fixture Confirmed"]["name_status"] == "已确认"
+    assert by_name["Fixture History"]["name_status"] == "历史名称候选"
+    assert by_name["Fixture History"]["name_candidates"][0]["status"] == "历史名称候选"
+    assert "暂无已确认昵称" in by_name["Fixture History"]["name_explanation"]
+    masked = [
+        item["name"]
+        for item in projection["human"]["entities"]
+        if item["name_status"] == "平台绑定"
+    ]
+    assert len(masked) == 2
+    assert len(set(masked)) == 2
+    assert all("UID后4位 0001" in value for value in masked)
+    assert all("55550001" not in value and "66660001" not in value for value in masked)
+    unbound = next(item for item in projection["human"]["entities"] if item["name_status"] == "未命名实体")
+    assert unbound["name"].startswith("未命名实体 · entity#")
+    assert "未命名用户" not in json.dumps(projection, ensure_ascii=False)
+
+    unknown = SimpleNamespace(id="person:unknown", aliases=None, platform_ids="malformed")
+    state = P1ObservatoryService._identity_display_state(unknown, (), "agent:xiaotianwen")
+    assert state["name_status"] == "未命名实体"
 
 
 def test_admin_episode_human_projection_has_four_stage_timeline_and_no_body_fallback() -> None:

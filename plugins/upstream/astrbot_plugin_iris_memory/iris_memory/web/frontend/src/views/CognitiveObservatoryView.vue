@@ -101,7 +101,8 @@
                 <template v-if="selectedAdaptiveKey === 'identity'">
                   <v-alert color="info" variant="tonal" density="compact" class="mb-3">{{ recordDetail?.human?.summary || '当前没有可显示的身份记录。' }}</v-alert>
                   <v-card v-for="entity in recordDetail?.human?.entities || []" :key="entity.name + entity.summary" variant="outlined" class="mb-3 pa-4">
-                    <div class="d-flex align-center ga-2"><v-icon icon="mdi-account-circle-outline" color="primary" /><div class="text-h6">{{ entity.name }}</div><v-chip size="small" color="info" variant="tonal">{{ entity.kind_label }}</v-chip></div>
+                    <div class="d-flex align-center flex-wrap ga-2"><v-icon icon="mdi-account-circle-outline" color="primary" /><div class="text-h6">{{ entity.name }}</div><v-chip size="small" color="info" variant="tonal">{{ entity.kind_label }}</v-chip><v-chip v-if="entity.name_status" size="small" :color="entity.name_status === '已确认' || entity.name_status === '机器人账号' ? 'success' : 'grey'" variant="tonal">{{ entity.name_status }}</v-chip></div>
+                    <div class="text-caption text-medium-emphasis mt-1">{{ entity.name_explanation || '名称状态暂无解释。' }}</div>
                     <div class="text-body-2 mt-2">{{ entity.summary }}</div>
                     <v-row dense class="mt-2"><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.valid ?? 0 }}</div><div class="text-caption">有效声明</div></v-col><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.conflict ?? 0 }}</div><div class="text-caption">冲突声明</div></v-col><v-col cols="4"><div class="detail-metric">{{ entity.claim_counts?.revoked ?? 0 }}</div><div class="text-caption">撤销声明</div></v-col></v-row>
                     <div class="section-label mt-3">平台账号</div>
@@ -109,7 +110,8 @@
                     <div v-else class="text-body-2 text-medium-emphasis">没有已绑定的平台账号。</div>
                     <div class="section-label mt-3">别名</div>
                     <div v-if="entity.aliases?.length" class="d-flex flex-wrap ga-2"><v-chip v-for="alias in entity.aliases" :key="alias.name" size="small" :color="alias.status === '冲突' ? 'error' : alias.status === '已确认' ? 'success' : 'grey'">{{ alias.name }} · {{ alias.status }} · {{ alias.source_explanation }}</v-chip></div>
-                    <div v-else class="text-body-2 text-medium-emphasis">没有已保存的别名；系统使用“{{ entity.name }}”作为显示名称。</div>
+                    <div v-else class="text-body-2 text-medium-emphasis">暂无已确认昵称；系统使用“{{ entity.name }}”作为显示名称。</div>
+                    <div v-if="entity.name_candidates?.length" class="text-caption text-amber-darken-2 mt-2">历史名称候选：<span v-for="(candidate, index) in entity.name_candidates" :key="candidate.name + index">{{ candidate.name }}{{ index < entity.name_candidates.length - 1 ? '、' : '' }}</span>（待人工确认）</div>
                   </v-card>
                   <v-card v-for="claim in recordDetail?.human?.claims || []" :key="claim.name + claim.target_name + claim.summary" variant="tonal" class="mb-2 pa-3"><div class="text-body-2">{{ claim.summary }}</div><div class="text-caption text-medium-emphasis mt-1">{{ claim.status }} · {{ claim.evidence_count }} 条依据 · {{ claim.source_explanation }}</div></v-card>
                   <div v-if="!recordDetail?.human?.entities?.length && !recordDetail?.human?.claims?.length" class="text-body-2 text-medium-emphasis py-4">{{ recordDetail?.human?.empty_message || '当前没有可显示的身份记录。' }}</div>

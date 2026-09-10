@@ -292,3 +292,145 @@ def test_account_context_provenance_uses_one_witness_for_many_bindings(tmp_path:
     )
     entity = next(record for record in result.document["records"] if record["kind"] == "entity")
     assert len(entity["provenance"]["evidence_refs"]) == 2
+
+
+def test_structured_sender_name_candidate_is_possible_and_content_is_never_read(tmp_path: Path):
+    p2r0 = tmp_path / "facts.jsonl"
+    _jsonl(p2r0, [_p2r0_account(), _p2r0_account()])
+    db_path = tmp_path / "data_v4.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "CREATE TABLE platform_message_history "
+        "(id INTEGER PRIMARY KEY, platform_id TEXT, user_id TEXT, sender_id TEXT, "
+        "sender_name TEXT, created_at TEXT, updated_at TEXT, content TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO platform_message_history"
+        "(id, platform_id, user_id, sender_id, sender_name, created_at, updated_at, content) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, "qq", "scope-a", "1001", "Fixture Alpha", "2026-01-01T00:00:00+00:00", "", "not-json"),
+            (2, "qq", "scope-a", "1001", "Fixture Alpha", "2026-01-02T00:00:00+00:00", "", "body-only-name"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    result = export_history(p2r0_path=p2r0, astrbot_db_path=db_path, authorization_ref="fixture-auth")
+    aliases = [record for record in result.document["records"] if record["kind"] == "alias"]
+    assert len(aliases) == 1
+    assert aliases[0]["payload"]["mention"] == "Fixture Alpha"
+    assert aliases[0]["payload"]["status"] == "POSSIBLE"
+    assert aliases[0]["provenance"]["field_path"] == "platform_message_history.sender_name"
+    assert len(aliases[0]["payload"]["evidence"]) == 3
+    assert result.report["safety"]["message_content_read"] is False
+    assert result.report["counts"]["structured_name_candidates"] == 1
+    assert all("body-only-name" not in json.dumps(record, ensure_ascii=False) for record in result.document["records"])
+
+
+def test_structured_sender_name_can_bind_without_adapter_context(tmp_path: Path):
+    db_path = tmp_path / "data_v4.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "CREATE TABLE platform_message_history "
+        "(id INTEGER PRIMARY KEY, platform_id TEXT, user_id TEXT, sender_id TEXT, "
+        "sender_name TEXT, created_at TEXT, content TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO platform_message_history"
+        "(id, platform_id, user_id, sender_id, sender_name, created_at, content) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, "qq", "scope-a", "2001", "Fixture Beta", "2026-01-01T00:00:00+00:00", "ignored"),
+            (2, "qq", "scope-a", "2001", "Fixture Beta", "2026-01-02T00:00:00+00:00", "ignored"),
+            (3, "qq", "scope-a", "2002", None, "2026-01-03T00:00:00+00:00", "ignored"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    result = export_history(astrbot_db_path=db_path, authorization_ref="fixture-auth")
+    entities = [record["payload"]["id"] for record in result.document["records"] if record["kind"] == "entity"]
+    aliases = [record for record in result.document["records"] if record["kind"] == "alias"]
+    assert entities == ["person:qq:2001"]
+    assert aliases[0]["payload"]["status"] == "POSSIBLE"
+    assert aliases[0]["provenance"]["account_id"] == ""
+    assert result.report["counts"]["structured_name_observations"] == 2
+    assert result.report["skipped_categories"]["MISSING_ACCOUNT_CONTEXT"] == 1
+
+
+def test_structured_name_conflicts_and_placeholders_stay_pending_and_platforms_are_isolated(tmp_path: Path):
+    p2r0 = tmp_path / "facts.jsonl"
+    _jsonl(
+        p2r0,
+        [
+            _p2r0_account("qq", "qq-bot"),
+            _p2r0_account("qq", "qq-bot"),
+        ],
+    )
+    episodes = tmp_path / "episodes.jsonl"
+    _jsonl(
+        episodes,
+        [
+            {
+                "scope_id": "scope",
+                "payload": {
+                    "participants": [
+                        {
+                            "role": "user",
+                            "platform": "onebot",
+                            "account_id": "onebot-bot",
+                            "uid": "1001",
+                            "display_name": "Fixture Other",
+                        }
+                    ],
+                },
+            },
+            {
+                "scope_id": "scope",
+                "payload": {
+                    "participants": [
+                        {
+                            "role": "user",
+                            "platform": "onebot",
+                            "account_id": "onebot-bot",
+                            "uid": "1001",
+                            "display_name": "Fixture Other",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    db_path = tmp_path / "data_v4.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "CREATE TABLE platform_message_history "
+        "(id INTEGER PRIMARY KEY, platform_id TEXT, user_id TEXT, sender_id TEXT, sender_name TEXT, content TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO platform_message_history"
+        "(id, platform_id, user_id, sender_id, sender_name, content) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "qq", "scope", "1001", "Fixture Old", "body"),
+            (2, "qq", "scope", "1001", "Fixture New", "body"),
+            (3, "qq", "scope", "1002", "1002", "body"),
+            (4, "qq", "scope", "1002", "用户", "body"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    result = export_history(
+        episode_path=episodes,
+        p2r0_path=p2r0,
+        astrbot_db_path=db_path,
+        authorization_ref="fixture-auth",
+    )
+    aliases = [record for record in result.document["records"] if record["kind"] == "alias"]
+    assert [(item["payload"]["candidate_entity"], item["payload"]["mention"]) for item in aliases] == [
+        ("person:onebot:1001", "Fixture Other")
+    ]
+    assert result.report["counts"]["structured_name_conflict_entities"] == 1
+    assert result.report["skipped_categories"]["STRUCTURED_NAME_CONFLICT_PENDING"] == 1
+    assert result.report["apply_blocked"] is False

@@ -8,6 +8,7 @@ Episode, Outcome, Review, Iris, or behavioural state.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -176,11 +177,28 @@ def _safe_sequence(value: object) -> tuple[object, ...]:
     return ()
 
 
+def _safe_mapping(value: object) -> Mapping[object, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _platform_label(platform: object) -> str:
     if not isinstance(platform, str) or not platform.strip():
         return "未知平台"
     normalized = platform.strip().casefold()
     return _PLATFORM_LABELS.get(normalized, platform.strip())
+
+
+def _uid_suffix(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return "未知"
+    return value[-4:]
+
+
+def _masked_platform_label(platform: object, value: object, *, collision: bool = False, entity_id: str = "") -> str:
+    label = f"{_platform_label(platform)} 用户 · UID后4位 {_uid_suffix(value)}"
+    if collision and entity_id:
+        label += f" · {_opaque_ref(entity_id, 'entity')}"
+    return label
 
 
 def _opaque_ref(value: object, prefix: str = "ref") -> str:
@@ -925,24 +943,140 @@ class P1ObservatoryService:
         return {"available": True, "episodes": items[offset : offset + limit], "total": total, "limit": limit, "offset": offset}
 
     @staticmethod
+    def _identity_display_state(
+        entity: object,
+        claims: tuple[object, ...],
+        self_entity: str,
+        *,
+        fallback_collisions: set[tuple[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one human label without changing Identity authority."""
+        entity_id = getattr(entity, "id", "")
+        entity_id = entity_id if isinstance(entity_id, str) else ""
+        if entity_id == self_entity:
+            return {
+                "name": "小天文（机器人账号）",
+                "name_status": "机器人账号",
+                "name_explanation": "SELF 由 Identity 的显式机器人绑定确定。",
+                "confirmed_aliases": [],
+                "name_candidates": [],
+            }
+        entity_claims = tuple(
+            claim for claim in claims if getattr(claim, "candidate_entity", None) == entity_id
+        )
+        confirmed: list[str] = []
+        pending: list[str] = []
+        seen_confirmed: set[str] = set()
+        seen_pending: set[str] = set()
+        for claim in entity_claims:
+            mention = getattr(claim, "mention", None)
+            if not isinstance(mention, str) or not mention.strip():
+                continue
+            mention_text = mention.strip()
+            mention_key = mention_text.casefold()
+            status = _enum_value(getattr(claim, "status", None))
+            related_targets = {
+                item.candidate_entity
+                for item in claims
+                if isinstance(getattr(item, "mention", None), str)
+                and item.mention.strip().casefold() == mention_key
+                and _enum_value(getattr(item, "status", None)) != "REVOKED"
+            }
+            confirmed_targets = {
+                item.candidate_entity
+                for item in claims
+                if isinstance(getattr(item, "mention", None), str)
+                and item.mention.strip().casefold() == mention_key
+                and _enum_value(getattr(item, "status", None)) == "CONFIRMED"
+            }
+            if status == "CONFIRMED" and confirmed_targets == {entity_id}:
+                if mention_key not in seen_confirmed:
+                    confirmed.append(mention_text)
+                    seen_confirmed.add(mention_key)
+            elif status == "POSSIBLE" and not (related_targets - {entity_id}):
+                if mention_key not in seen_pending:
+                    pending.append(mention_text)
+                    seen_pending.add(mention_key)
+        if confirmed:
+            return {
+                "name": confirmed[0],
+                "name_status": "已确认",
+                "name_explanation": "当前显示的是 Identity 中已有的确认别名。",
+                "confirmed_aliases": confirmed,
+                "name_candidates": [],
+            }
+        candidate_views = [
+            {
+                "name": name,
+                "status": "历史名称候选",
+                "explanation": "历史结构化名称候选，暂无已确认昵称。",
+            }
+            for name in pending
+        ]
+        if len(pending) == 1:
+            return {
+                "name": pending[0],
+                "name_status": "历史名称候选",
+                "name_explanation": "历史结构化名称候选，暂无已确认昵称。",
+                "confirmed_aliases": [],
+                "name_candidates": candidate_views,
+            }
+        bindings = sorted(
+            (str(platform), value)
+            for platform, value in _safe_mapping(getattr(entity, "platform_ids", {})).items()
+            if isinstance(platform, str) and platform.strip() and isinstance(value, str) and value.strip()
+        )
+        if bindings:
+            platform, value = bindings[0]
+            key = (platform.casefold(), _uid_suffix(value))
+            return {
+                "name": _masked_platform_label(
+                    platform,
+                    value,
+                    collision=key in (fallback_collisions or set()),
+                    entity_id=entity_id,
+                ),
+                "name_status": "平台绑定",
+                "name_explanation": "暂无已确认昵称；当前使用平台绑定的脱敏标识。",
+                "confirmed_aliases": [],
+                "name_candidates": candidate_views,
+            }
+        return {
+            "name": f"未命名实体 · {_opaque_ref(entity_id, 'entity')}",
+            "name_status": "未命名实体",
+            "name_explanation": "暂无已确认昵称，且没有可用的平台绑定。",
+            "confirmed_aliases": [],
+            "name_candidates": candidate_views,
+        }
+
+    @staticmethod
     def _identity_claim_human(
         claim: object,
         entities_by_id: Mapping[str, object],
         claims: tuple[object, ...],
+        self_entity: str = "agent:xiaotianwen",
+        fallback_collisions: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         mention = getattr(claim, "mention", None)
         mention_text = mention.strip() if isinstance(mention, str) else "未命名"
         candidate = getattr(claim, "candidate_entity", None)
         candidate_id = candidate if isinstance(candidate, str) else ""
         target = entities_by_id.get(candidate_id)
-        target_aliases = tuple(
-            alias.strip()
-            for alias in _safe_sequence(getattr(target, "aliases", ()))
-            if isinstance(alias, str) and alias.strip()
+        target_state = (
+            P1ObservatoryService._identity_display_state(
+                target,
+                claims,
+                self_entity,
+                fallback_collisions=fallback_collisions,
+            )
+            if target is not None
+            else {
+                "name": "小天文（机器人账号）" if candidate_id.startswith("agent:") else "未命名实体",
+                "name_status": "未知",
+                "name_explanation": "身份目标不可用。",
+            }
         )
-        target_name = target_aliases[0] if target_aliases else (
-            "小天文自己" if candidate_id.startswith("agent:") else "未命名用户"
-        )
+        target_name = target_state["name"]
         mention_key = mention_text.casefold()
         related = tuple(
             item
@@ -974,7 +1108,10 @@ class P1ObservatoryService:
             "target_name": target_name,
             "status": status_label,
             "evidence_count": len(evidence),
-            "source_explanation": f"来源为{source_label}",
+            "source_explanation": (
+                f"来源为{source_label}。"
+                + ("暂无已确认昵称。" if raw_status != "CONFIRMED" else "")
+            ),
             "known": raw_status in _IDENTITY_STATUS_LABELS or conflict,
         }
 
@@ -985,21 +1122,31 @@ class P1ObservatoryService:
         claims: tuple[object, ...],
         self_entity: str,
         entities_by_id: Mapping[str, object] | None = None,
+        fallback_collisions: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         entity_id = getattr(entity, "id", None)
         entity_id = entity_id if isinstance(entity_id, str) else ""
         is_self = entity_id == self_entity
-        aliases = tuple(
-            alias.strip()
-            for alias in _safe_sequence(getattr(entity, "aliases", ()))
-            if isinstance(alias, str) and alias.strip()
-        )
         entity_claims = tuple(
             claim for claim in claims if getattr(claim, "candidate_entity", None) == entity_id
         )
         entities_by_id = entities_by_id or {entity_id: entity}
+        state = cls._identity_display_state(
+            entity,
+            claims,
+            self_entity,
+            fallback_collisions=fallback_collisions,
+        )
+        alias_mentions: dict[str, str] = {}
+        for alias in _safe_sequence(getattr(entity, "aliases", ())):
+            if isinstance(alias, str) and alias.strip():
+                alias_mentions.setdefault(alias.strip().casefold(), alias.strip())
+        for claim in entity_claims:
+            mention = getattr(claim, "mention", None)
+            if isinstance(mention, str) and mention.strip():
+                alias_mentions.setdefault(mention.strip().casefold(), mention.strip())
         alias_views: list[dict[str, Any]] = []
-        for alias in aliases:
+        for alias in alias_mentions.values():
             related = tuple(
                 claim
                 for claim in claims
@@ -1007,7 +1154,13 @@ class P1ObservatoryService:
                 and claim.mention.strip().casefold() == alias.casefold()
             )
             statuses = [
-                cls._identity_claim_human(claim, entities_by_id, claims).get("status")
+                cls._identity_claim_human(
+                    claim,
+                    entities_by_id,
+                    claims,
+                    self_entity,
+                    fallback_collisions,
+                ).get("status")
                 for claim in related
             ]
             status = (
@@ -1026,22 +1179,38 @@ class P1ObservatoryService:
                 )
                 else "系统记录"
             )
+            candidate_status = "历史名称候选，暂无已确认昵称。" if "待确认" in statuses else ""
             alias_views.append(
                 {
                     "name": alias,
                     "status": status,
-                    "source_explanation": f"来源为{source_label}",
+                    "source_explanation": f"来源为{source_label}。{candidate_status}",
                 }
             )
-        platform_bindings = [
-            {
-                "platform": _platform_label(platform),
-                "value": value if isinstance(value, str) else "未知值，查看工程详情",
-                "status": "已绑定" if isinstance(value, str) and value else "不可用",
-                "source_explanation": "来源为系统记录的平台绑定",
-            }
-            for platform, value in dict(getattr(entity, "platform_ids", {})).items()
-        ]
+        platform_bindings = []
+        for platform, value in sorted(
+            _safe_mapping(getattr(entity, "platform_ids", {})).items(),
+            key=lambda item: str(item[0]),
+        ):
+            valid_binding = isinstance(platform, str) and bool(platform.strip()) and isinstance(value, str) and bool(value.strip())
+            key = (platform.casefold(), _uid_suffix(value)) if isinstance(platform, str) else ("", "")
+            platform_bindings.append(
+                {
+                    "platform": _platform_label(platform),
+                    "value": (
+                        _masked_platform_label(
+                            platform,
+                            value,
+                            collision=key in (fallback_collisions or set()),
+                            entity_id=entity_id,
+                        )
+                        if valid_binding
+                        else "未知值，查看工程详情"
+                    ),
+                    "status": "已绑定" if valid_binding else "不可用",
+                    "source_explanation": "来源为系统记录的平台绑定；UID 已脱敏。",
+                }
+            )
         conflict_mentions: set[str] = set()
         for claim in claims:
             mention = getattr(claim, "mention", None)
@@ -1075,15 +1244,17 @@ class P1ObservatoryService:
             )
             for claim in entity_claims
         )
-        confirmed_alias_count = sum(item["status"] == "已确认" for item in alias_views)
-        name = aliases[0] if aliases else ("小天文自己" if is_self else "未命名用户")
-        kind_label = "小天文自己" if is_self else "一个用户身份"
+        kind_label = "小天文（机器人账号）" if is_self else "一个用户身份"
         return {
-            "name": name,
+            "name": state["name"],
+            "name_status": state["name_status"],
+            "name_explanation": state["name_explanation"],
+            "name_candidates": state["name_candidates"],
             "kind_label": kind_label,
             "summary": (
                 f"这是{kind_label}；已绑定 {len(platform_bindings)} 个平台账号；"
-                f"有 {confirmed_alias_count} 个确认别名；当前有 {valid_count} 条有效、"
+                f"{state['name_explanation']} 有 "
+                f"{sum(item['status'] == '已确认' for item in alias_views)} 个确认别名；当前有 {valid_count} 条有效、"
                 f"{conflict_count} 条冲突、{revoked_count} 条撤销声明。"
             ),
             "platforms": platform_bindings,
@@ -1108,11 +1279,33 @@ class P1ObservatoryService:
             for entity in entities
             if isinstance(getattr(entity, "id", None), str)
         }
+        fallback_keys: Counter[tuple[str, str]] = Counter()
+        for entity in entities:
+            for platform, value in _safe_mapping(getattr(entity, "platform_ids", {})).items():
+                if isinstance(platform, str) and isinstance(value, str) and value.strip():
+                    fallback_keys[(platform.casefold(), _uid_suffix(value))] += 1
+        fallback_collisions = {
+            key for key, count in fallback_keys.items() if count > 1
+        }
         entity_views = [
-            cls._identity_entity_human(entity, claims, self_entity, entities_by_id) for entity in entities
+            cls._identity_entity_human(
+                entity,
+                claims,
+                self_entity,
+                entities_by_id,
+                fallback_collisions,
+            )
+            for entity in entities
         ]
         claim_views = [
-            cls._identity_claim_human(claim, entities_by_id, claims) for claim in claims
+            cls._identity_claim_human(
+                claim,
+                entities_by_id,
+                claims,
+                self_entity,
+                fallback_collisions,
+            )
+            for claim in claims
         ]
         return {
             "summary": f"当前记录了 {len(entities)} 个身份和 {len(claims)} 条身份声明。",
