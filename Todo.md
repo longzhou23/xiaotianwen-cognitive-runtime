@@ -788,7 +788,7 @@ G4：Observatory。
 
 ## 2026-09-10 管理员观测台人话默认视图
 
-状态：本地完成，生产部署待完成
+状态：完成（本地验证、推送和生产定向部署均已完成）
 
 具体缺口：管理员身份、互动和结果详情虽然已提供契约字段，但默认仍以工程 ID、枚举和原始表格为主，非技术维护者无法一眼判断发生了什么。
 
@@ -796,6 +796,6 @@ G4：Observatory。
 
 前端管理员弹窗默认进入“易懂视图（默认）”，Identity/Episode/Outcome 的工程字段、ID、枚举和原始 JSON 通过“工程详情”切换查看；空、不可用、未知枚举和缺字段均有人话说明并保持 fail-closed。后端仍只读、不调用 Provider/LLM、不从原始消息库补读、不持久化、不改变 Identity/Persona/Affect/Relationship owner；正文继续最多 240 字符并沿用递归 secret redaction。构建后移除不再被 `iris.js` 引用的旧观测台 chunk。
 
-验证：管理员后端 `tests/web/test_cognitive_observatory.py`：37 passed, 1 warning；相关 Web 回归：99 passed, 2 个既有 `persona_evolution` rollback/adopt 状态断言失败；`ruff check --select F`、`py_compile`、前端 `npm run test:run`（2 files, 13 passed）、`npm run build:check`（vue-tsc + Vite）和 `git diff --check` 通过。尚待完成本卡要求的 Azure `azure-xtw-01` 备份、推送、部署、重启与线上健康/未认证接口检查。
+验证：管理员后端 `tests/web/test_cognitive_observatory.py`：37 passed, 1 warning；相关 Web 回归：99 passed, 2 个既有 `persona_evolution` rollback/adopt 状态断言失败；`ruff check --select F`、`py_compile`、前端 `npm run test:run`（2 files, 13 passed）、`npm run build:check`（vue-tsc + Vite）和 `git diff --check` 通过。提交 `9a81abc` 已推送 `main`。生产 `azure-xtw-01` 已在插件扫描目录外建立 `/home/developer/xiaotianwen/backups/observatory-human-20260910T033806Z/` 定向备份并生成 SHA256；人话服务投影与 `pages/iris` 构建资产已同步至 public/runtime，AstrBot 已重启。`deploy/verify.sh` 通过，Dashboard/SnowLuma HTTP 200、8001/6081 监听、容器重启计数为 0；新管理员接口未认证请求返回 401；Iris 异步初始化完成。
 
-未验证：真实管理员浏览器逐项视觉验收、生产真实 Identity/Episode/Outcome 数据和管理员权限链；相关 Web 回归中的两个 Persona Evolution 失败与本卡无关，需另行修复。
+未验证：真实管理员浏览器逐项视觉验收、生产真实 Identity/Episode/Outcome 数据和已认证管理员权限链；相关 Web 回归中的两个 Persona Evolution 失败与本卡无关，需另行修复。生产公共工作树原有的 CAS/运行态未提交改动已保留，未执行常规全量拉取；本次只同步了人话服务与 `pages/iris` 定向文件。
