@@ -52,6 +52,7 @@ _ALLOWED_SOURCE_TYPES = {
     "platform_session",
     "episode_event_ref",
     "p2r0_archive",
+    "p2r1_authority",
 }
 _REFUSABLE_ALIAS_SOURCES = {"identity_export", "manual_confirmed_claim"}
 
@@ -121,7 +122,18 @@ def _load_current(path: Path) -> tuple[bytes, EntityRegistry]:
 def _parse_provenance(raw: object, *, kind: str) -> dict[str, Any]:
     provenance = _strict_keys(
         raw,
-        {"source_type", "source_ref", "basis", "evidence_refs"},
+        {
+            "source_type",
+            "source_ref",
+            "basis",
+            "evidence_refs",
+            "field_path",
+            "record_hash",
+            "role",
+            "account_id",
+            "platform",
+            "uid",
+        },
         f"{kind} provenance",
     )
     source_type = _require_nonempty_string(provenance["source_type"], f"{kind} source_type")
@@ -134,21 +146,42 @@ def _parse_provenance(raw: object, *, kind: str) -> dict[str, Any]:
         not isinstance(ref, str) or not ref.strip() for ref in refs
     ):
         raise RebuildError(f"{kind} evidence_refs must contain explicit references")
+    field_path = _require_nonempty_string(provenance["field_path"], f"{kind} field_path")
+    record_hash = _require_nonempty_string(provenance["record_hash"], f"{kind} record_hash")
+    if len(record_hash) != 64 or any(char not in "0123456789abcdef" for char in record_hash):
+        raise RebuildError(f"{kind} record_hash must be a lowercase SHA-256")
+    role = _require_nonempty_string(provenance["role"], f"{kind} role")
+    if role not in {"user", "self"}:
+        raise RebuildError(f"{kind} role must be user or self")
+    account_id = provenance["account_id"]
+    platform = provenance["platform"]
+    uid = provenance["uid"]
+    for label, value in (("account_id", account_id), ("platform", platform), ("uid", uid)):
+        if not isinstance(value, str):
+            raise RebuildError(f"{kind} {label} must be a string")
+    if kind in {"entity", "self_binding"} and (not account_id.strip() or not platform.strip() or not uid.strip()):
+        raise RebuildError(f"{kind} provenance must include platform, account_id, and uid")
     return {
         "source_type": source_type,
         "source_ref": source_ref,
         "basis": basis,
         "evidence_refs": [ref.strip() for ref in refs],
+        "field_path": field_path,
+        "record_hash": record_hash,
+        "role": role,
+        "account_id": account_id.strip(),
+        "platform": platform.strip().casefold(),
+        "uid": uid.strip(),
     }
 
 
-def _load_source(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _load_source(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     raw = _read_bytes(path)
     try:
         document = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RebuildError(f"source is not valid JSON: {path}") from exc
-    root = _strict_keys(document, {"schema", "authorization", "records"}, "source")
+    root = _strict_keys(document, {"schema", "authorization", "records", "scan"}, "source")
     if root["schema"] != SOURCE_SCHEMA:
         raise RebuildError(f"source schema mismatch: {path}")
     authorization = _strict_keys(
@@ -159,6 +192,19 @@ def _load_source(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if authorization["authorized"] is not True or authorization["scope"] != "identity-rebuild":
         raise RebuildError(f"source is not explicitly authorized for identity rebuild: {path}")
     _require_nonempty_string(authorization["authorization_ref"], "authorization_ref")
+    scan = _strict_keys(root["scan"], {"apply_blocked", "conflicts"}, "source scan")
+    if type(scan["apply_blocked"]) is not bool:
+        raise RebuildError("source scan apply_blocked must be boolean")
+    scan_conflicts = scan["conflicts"]
+    if not isinstance(scan_conflicts, list):
+        raise RebuildError("source scan conflicts must be a list")
+    for index, conflict in enumerate(scan_conflicts):
+        item = _strict_keys(conflict, {"category", "count"}, f"source scan conflict {index}")
+        _require_nonempty_string(item["category"], f"source scan conflict {index} category")
+        if type(item["count"]) is not int or item["count"] <= 0:
+            raise RebuildError(f"source scan conflict {index} count must be positive")
+    if bool(scan_conflicts) != scan["apply_blocked"]:
+        raise RebuildError("source scan conflict state is inconsistent")
     records = root["records"]
     if not isinstance(records, list):
         raise RebuildError(f"source records must be a list: {path}")
@@ -180,7 +226,7 @@ def _load_source(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 "source_sha256": _sha256_bytes(raw),
             }
         )
-    return authorization, normalized
+    return authorization, normalized, scan
 
 
 def _parse_entity(payload: object) -> dict[str, Any]:
@@ -317,6 +363,12 @@ def make_plan(current_path: Path, source_paths: list[Path]) -> PlanResult:
             "basis": item["provenance"]["basis"],
             "source_type": item["provenance"]["source_type"],
             "evidence_ref_hashes": [_ref_hash(ref) for ref in item["provenance"]["evidence_refs"]],
+            "field_path_hash": _ref_hash(item["provenance"]["field_path"]),
+            "record_hash": item["provenance"]["record_hash"],
+            "role": item["provenance"]["role"],
+            "account_id_hash": _ref_hash(item["provenance"]["account_id"]),
+            "platform_hash": _ref_hash(item["provenance"]["platform"]),
+            "uid_hash": _ref_hash(item["provenance"]["uid"]),
         }
         if detail:
             entry["detail"] = detail
@@ -328,10 +380,21 @@ def make_plan(current_path: Path, source_paths: list[Path]) -> PlanResult:
             target.append(entry)
 
     items: list[dict[str, Any]] = []
+    source_scan_conflicts: list[dict[str, Any]] = []
     for source_path in source_paths:
-        _, source_items = _load_source(source_path)
+        _, source_items, source_scan = _load_source(source_path)
         items.extend(source_items)
+        for conflict in source_scan["conflicts"]:
+            source_scan_conflicts.append(
+                {
+                    "action": "conflict",
+                    "category": "EXPORT_PREFLIGHT_" + conflict["category"],
+                    "count": conflict["count"],
+                    "source_path_hash": _ref_hash(str(source_path)),
+                }
+            )
     source_record_count = len(items)
+    conflicts.extend(source_scan_conflicts)
 
     parsed_entities: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for item in items:

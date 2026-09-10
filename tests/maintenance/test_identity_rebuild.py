@@ -33,6 +33,12 @@ def _provenance(source_type: str = "platform_session", basis: str = "platform_ui
         "source_ref": "fixture:source",
         "basis": basis,
         "evidence_refs": ["fixture:evidence"],
+        "field_path": "fixture.payload.identity",
+        "record_hash": "a" * 64,
+        "role": "self" if basis == "self_binding" else "user",
+        "account_id": "fixture-account",
+        "platform": "qq",
+        "uid": "9000",
     }
 
 
@@ -45,6 +51,7 @@ def _source(*records: dict, authorized: bool = True) -> dict:
             "authorization_ref": "fixture:authorization",
         },
         "records": list(records),
+        "scan": {"apply_blocked": False, "conflicts": []},
     }
 
 
